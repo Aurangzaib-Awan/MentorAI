@@ -1,8 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from models.user import User
 from con import client
 from passlib.context import CryptContext
-from auth import create_access_token
+ 
 
 
 router = APIRouter()
@@ -14,7 +14,7 @@ def hash_password(pwd: str):
     return pwd_context.hash(pwd)
 
 @router.post("/signup")
-async def create_user(user: User):
+async def create_user(request: Request, response: Response, user: User):
     try:
         # If already in database → stop
         if users_collection.find_one({"email": user.email}):
@@ -26,13 +26,21 @@ async def create_user(user: User):
 
         users_collection.insert_one(user_dict)
 
-        token = create_access_token({"email": user.email})
+        # Create server-managed session (cookie-based)
+        sm = request.state.session_manager
+        session = sm.create_session(request, user.email, "student")
+        cookie_name = sm.cookie_name
+        max_age = int(sm.idle_timeout.total_seconds())
+        response.set_cookie(cookie_name, session["_id"], httponly=True, secure=sm.cookie_secure, samesite="Strict", path='/', max_age=max_age)
 
         return {
-            "access_token": token,
-            "token_type": "bearer",
             "user": {
-                "email": user.email
+                "fullname": user_dict["fullname"],
+                "email": user_dict["email"],
+                "role": "student",
+                "is_admin": False,
+                "is_hr": False,
+                "is_mentor": False
             }
         }
 

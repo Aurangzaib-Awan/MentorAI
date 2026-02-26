@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ChangePasswordForm from './ChangePasswordForm';
+import { authAPI } from '@/services/api';
 
 const Header = () => {
   const [showAuthOptions, setShowAuthOptions] = useState(false);
@@ -11,28 +12,37 @@ const Header = () => {
   const handleLogout = () => {
     console.log('Logging out...');
     
-    // Clear all authentication data
-    const itemsToRemove = [
-      'adminToken', 'adminUser', 'token', 'user', 
-      'authToken', 'userData', 'session'
-    ];
-    
-    itemsToRemove.forEach(item => {
-      localStorage.removeItem(item);
-      sessionStorage.removeItem(item);
-    });
-    
-    // Clear the dropdown
-    setShowAuthOptions(false);
-    setShowLogoutConfirm(false);
-    
-    // Redirect to home page
-    navigate('/');
-    
-    // Optional: Force reload for clean state
-    setTimeout(() => {
-      window.location.reload();
-    }, 100);
+    // Call backend logout to destroy server session
+    (async () => {
+      try {
+        await authAPI.logout();
+      } catch (err) {
+        console.warn('Logout API failed', err);
+      }
+
+      // Clear all authentication data
+      const itemsToRemove = [
+        'adminToken', 'adminUser', 'token', 'user', 
+        'authToken', 'userData', 'session'
+      ];
+      
+      itemsToRemove.forEach(item => {
+        localStorage.removeItem(item);
+        sessionStorage.removeItem(item);
+      });
+      
+      // Clear the dropdown
+      setShowAuthOptions(false);
+      setShowLogoutConfirm(false);
+      
+      // Redirect to home page
+      navigate('/');
+      
+      // Optional: Force reload for clean state
+      setTimeout(() => {
+        window.location.reload();
+      }, 100);
+    })();
   };
 
   const handleLogoutClick = () => {

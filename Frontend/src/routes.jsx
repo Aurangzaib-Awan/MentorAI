@@ -1,5 +1,5 @@
 // routes/AppRoutes.jsx
-import { Route, Routes, Navigate } from "react-router-dom";
+import { Route, Routes, Navigate, useLocation } from "react-router-dom";
 import Home from "./pages/Home.jsx";
 import Signup from "./pages/Signup.jsx";
 import Login from "./pages/Login.jsx";
@@ -32,8 +32,9 @@ import ProjectManagement from "./pages/admin/ProjectManagement";
 
 // Protected Route Components
 const ProtectedRoute = ({ user, children, adminOnly = false }) => {
+  const location = useLocation();
   if (!user) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
   if (adminOnly && !user.is_admin) {

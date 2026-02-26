@@ -1,23 +1,41 @@
 // services/api.js
 const API_BASE_URL = 'http://localhost:8000';
 
+let _csrf = null;
+
+const fetchCsrf = async () => {
+  if (_csrf) return _csrf;
+  const res = await fetch(`${API_BASE_URL}/session/csrf`, { credentials: 'include' });
+  if (!res.ok) throw new Error('Failed to fetch CSRF token');
+  const data = await res.json();
+  _csrf = data.csrf_token;
+  return _csrf;
+};
+
 const apiRequest = async (endpoint, options = {}) => {
   try {
-    const token = localStorage.getItem('token');
     const headers = {
       'Content-Type': 'application/json',
       ...options.headers,
     };
 
-    // Add authorization header if token exists
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+    // Use cookie-based auth; include credentials
+    const opts = {
+      credentials: 'include',
       headers,
       ...options,
-    });
+    };
+
+    // For state-changing requests, ensure CSRF header (skip for login/signup/oauth)
+    if (opts.method && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(opts.method.toUpperCase())) {
+      const path = endpoint.split('?')[0];
+      if (!path.startsWith('/login') && !path.startsWith('/signup') && !path.startsWith('/auth/google')) {
+        const token = await fetchCsrf();
+        opts.headers['X-CSRF-Token'] = token;
+      }
+    }
+
+    const response = await fetch(`${API_BASE_URL}${endpoint}`, opts);
 
     if (!response.ok) {
       let errorDetail = `API error: ${response.status}`;
@@ -55,8 +73,14 @@ export const authAPI = {
     });
   },
 
+  logout: async () => {
+    return await apiRequest('/logout', {
+      method: 'POST',
+    });
+  },
+
   getCurrentUser: async () => {
-    return await apiRequest('/user');
+    return await apiRequest('/me');
   },
 
   // Add changePassword to authAPI as well

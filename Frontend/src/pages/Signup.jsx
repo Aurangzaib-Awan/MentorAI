@@ -98,20 +98,12 @@ function Signup({ setUser }) {
       const data = await authAPI.register(form);
       console.log("Server response:", data);
 
-      if (data.access_token) {
-        localStorage.setItem("token", data.access_token);
-        if (data.user) {
-          localStorage.setItem("user", JSON.stringify(data.user));
-          if (setUser) setUser(data.user);
-        }
-
+      // Server-managed session: success indicated by presence of user
+      if (data && (data.user || data.email)) {
+        const user = data.user || { email: data.email };
+        if (setUser) setUser(user);
         setSuccessMessage("Account created successfully! Redirecting...");
-
-        // Show success message for 2 seconds before redirecting
-        setTimeout(() => {
-          navigate(from);
-        }, 2000);
-
+        setTimeout(() => navigate(from), 1000);
       } else {
         setServerError("Signup failed. Please try again.");
       }

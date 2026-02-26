@@ -34,15 +34,18 @@ function App() {
 
   useEffect(() => {
     const initializeApp = async () => {
-      const token = localStorage.getItem('token');
-      const userData = localStorage.getItem('user');
-
-      if (token && userData) {
-        setTimeout(() => {
-          setUser(JSON.parse(userData));
-          setLoading(false);
-        }, 0);
-      } else {
+      try {
+        const { authAPI } = await import('./services/api');
+        const data = await authAPI.getCurrentUser();
+        if (data && (data.email || data.user)) {
+          const u = data.user || { email: data.email, role: data.role };
+          setUser(u);
+        } else {
+          setUser(null);
+        }
+      } catch (err) {
+        setUser(null);
+      } finally {
         setLoading(false);
       }
     };

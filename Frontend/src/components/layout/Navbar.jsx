@@ -53,12 +53,12 @@ const Navbar = () => {
                     </div>
 
                     <div className="hidden md:flex items-center space-x-4">
-                        <Link to="/login">
+                        <Link to="/login" state={{ from: { pathname: location.pathname } }}>
                             <Button variant="ghost" size="sm">
                                 Log in
                             </Button>
                         </Link>
-                        <Link to="/signup">
+                            <Link to="/signup" state={{ from: { pathname: location.pathname } }}>
                             <Button size="sm">
                                 Sign up
                             </Button>
@@ -92,12 +92,12 @@ const Navbar = () => {
                             </Link>
                         ))}
                         <div className="pt-4 flex flex-col space-y-3 border-t border-border">
-                            <Link to="/login" onClick={() => setIsMobileMenuOpen(false)}>
+                            <Link to="/login" state={{ from: { pathname: location.pathname } }} onClick={() => setIsMobileMenuOpen(false)}>
                                 <Button variant="ghost" className="w-full justify-start">
                                     Log in
                                 </Button>
                             </Link>
-                            <Link to="/signup" onClick={() => setIsMobileMenuOpen(false)}>
+                            <Link to="/signup" state={{ from: { pathname: location.pathname } }} onClick={() => setIsMobileMenuOpen(false)}>
                                 <Button className="w-full">
                                     Sign up
                                 </Button>

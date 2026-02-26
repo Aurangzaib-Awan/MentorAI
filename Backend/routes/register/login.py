@@ -1,6 +1,7 @@
-from fastapi import HTTPException, APIRouter
+from fastapi import HTTPException, APIRouter, Request, Response
 from passlib.context import CryptContext
-from auth import create_access_token
+import logging
+from fastapi import HTTPException
 from con import client
 from models.login_model import Login_Model
 
@@ -12,9 +13,18 @@ users_collection = db["users"]
 role_emails_collection = db["role_emails"]
 
 pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
+logger = logging.getLogger("auth")
+
 
 def verify_pwd(plain_pwd, hashed):
-    return pwd_context.verify(plain_pwd, hashed)
+    try:
+        if not hashed:
+            return False
+        return pwd_context.verify(plain_pwd, hashed)
+    except Exception:
+        # Any error verifying password should be treated as verification failure
+        logger.exception("password verification error")
+        return False
 
 # Initialize role emails collection with sample data
 async def initialize_role_emails():
@@ -36,7 +46,7 @@ async def initialize_role_emails():
         role_emails_collection.insert_many(sample_roles)
 
 @router.post("/login")
-async def login(user: Login_Model):
+async def login(request: Request, response: Response, user: Login_Model):
     try:
         # Initialize role emails if collection is empty
         await initialize_role_emails()
@@ -44,10 +54,10 @@ async def login(user: Login_Model):
         temp_user = users_collection.find_one({"email": user.email})
 
         if not temp_user:
-            raise HTTPException(status_code=400, detail="User not found")
-    
-        if not verify_pwd(user.password, temp_user["password"]):
-            raise HTTPException(status_code=401, detail="Invalid password")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        if not verify_pwd(user.password, temp_user.get("password")):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
         
         # Check role from role_emails collection
         role_data = role_emails_collection.find_one({
@@ -77,12 +87,18 @@ async def login(user: Login_Model):
             "is_mentor": role == "mentor"
         }
         
-        token = create_access_token(token_payload)
-        
+        # Create server-managed session (cookie-based)
+        sm = request.state.session_manager
+        session = sm.create_session(request, user.email, role)
+
+        # Set secure cookie (HttpOnly, Secure, SameSite=Strict)
+        cookie_name = sm.cookie_name
+        max_age = int(sm.idle_timeout.total_seconds())
+        response.set_cookie(cookie_name, session["_id"], httponly=True, secure=sm.cookie_secure, samesite="Strict", path='/', max_age=max_age)
+
         return {
-            "token": token,
-            "token_type": "bearer",
             "user": {
+                "fullname": temp_user.get("fullname", ""),
                 "email": user.email,
                 "role": role,
                 "is_admin": role == "admin",
@@ -91,6 +107,45 @@ async def login(user: Login_Model):
             }
         }
         
+    except HTTPException:
+        # Re-raise intentional HTTP errors to be handled by FastAPI
+        raise
     except Exception as e:
-        print("login error:", e)
+        logger.exception("Unexpected error during login")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/logout")
+async def logout(request: Request, response: Response):
+    try:
+        sm = request.state.session_manager
+        cookie_name = sm.cookie_name
+        sid = request.cookies.get(cookie_name)
+        if sid:
+            sm.destroy_session(sid)
+        response.delete_cookie(cookie_name, path='/', secure=sm.cookie_secure, samesite="Strict")
+        return {"detail": "logged out"}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/session/csrf")
+async def get_csrf(request: Request):
+    # Return the CSRF token tied to the session (if any)
+    sm = request.state.session_manager
+    sid = request.cookies.get(sm.cookie_name)
+    if not sid:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    s = sm.get_session(sid)
+    if not s:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    # Safe to return only the csrf token (not session id)
+    return {"csrf_token": s.get("csrf_token")}
+
+
+@router.get("/me")
+async def me(request: Request):
+    s = getattr(request.state, "session", None)
+    if not s:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return {"email": s.get("email"), "role": s.get("role")}

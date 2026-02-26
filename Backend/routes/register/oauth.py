@@ -1,7 +1,6 @@
 # oauth.py
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
-from auth import create_access_token
 from con import client
 import os
 import requests
@@ -35,7 +34,7 @@ async def google_auth():
     return RedirectResponse(google_auth_url)
 
 @router.get("/auth/google/callback")
-async def google_auth_callback(request: Request, code: str = None):
+async def google_auth_callback(request: Request, response: Response, code: str = None):
     """Handle Google OAuth callback - Only for regular users (students)"""
     if not code:
         raise HTTPException(status_code=400, detail="Authorization code not provided")
@@ -109,10 +108,14 @@ async def google_auth_callback(request: Request, code: str = None):
             "auth_provider": "google"
         }
         
-        token = create_access_token(token_payload)
-        
-        # Redirect to frontend with token
-        frontend_url = f"http://localhost:3000/oauth-success?token={token}&email={email}"
+        # Create server-side session and set cookie, then redirect without exposing token
+        sm = request.state.session_manager
+        session = sm.create_session(request, email, role)
+        cookie_name = sm.cookie_name
+        max_age = int(sm.idle_timeout.total_seconds())
+        response.set_cookie(cookie_name, session["_id"], httponly=True, secure=sm.cookie_secure, samesite="Strict", path='/', max_age=max_age)
+
+        frontend_url = f"http://localhost:3000/oauth-success?email={email}"
         return RedirectResponse(frontend_url)
         
     except Exception as e:

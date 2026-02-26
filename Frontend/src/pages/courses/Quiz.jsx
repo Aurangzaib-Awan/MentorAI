@@ -303,6 +303,36 @@ const Quiz = () => {
     };
   }, [stopProctoring]);
 
+
+  // ========================================================================
+  // COPY & TAB SWITCH DETECTION
+  // - Penalize user by 1 chance when they copy from the page or switch tabs
+  // - Uses built-in `copy` event and `visibilitychange` (document.hidden)
+  // ========================================================================
+  useEffect(() => {
+    if (!quizStarted) return;
+
+    const handleCopyEvent = (e) => {
+      console.log('📋 Copy detected during quiz');
+      handleAlert({ alert: 'copy_detected', behavior_status: 'copy_event' });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        console.log('🔁 Tab switched/hidden during quiz');
+        handleAlert({ alert: 'tab_switch', behavior_status: 'visibility_hidden' });
+      }
+    };
+
+    window.addEventListener('copy', handleCopyEvent);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('copy', handleCopyEvent);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [quizStarted, handleAlert]);
+
   // ========================================================================
   // RENDER: QUIZ TERMINATED
   // ========================================================================

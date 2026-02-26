@@ -18,8 +18,8 @@ function Login({ setUser }) {
     const navigate = useNavigate();
     const location = useLocation();
 
-    // Get the return URL from location state
-    const from = location.state?.from?.pathname || "/";
+    // Get the return URL from location state (undefined if none)
+    const from = location.state?.from?.pathname;
 
     function handleChange(e) {
         setForm({ ...form, [e.target.name]: e.target.value });
@@ -32,9 +32,9 @@ function Login({ setUser }) {
     };
 
     const handleClose = () => {
-        // Navigate back or to home page
-        if (from && from !== "/") {
-            navigate(-1); // Go back to previous page
+        // If there was a previous page, go back; otherwise go home
+        if (location.state?.from) {
+            navigate(-1);
         } else {
             navigate("/");
         }
@@ -48,34 +48,31 @@ function Login({ setUser }) {
         try {
             const data = await authAPI.login(form.email, form.password);
 
-            if (data.token && data.user) {
-                localStorage.setItem("token", data.token);
-                localStorage.setItem("user", JSON.stringify(data.user));
-
-                if (setUser) {
-                    setUser(data.user);
-                }
+            // Server-managed session: success indicated by presence of user
+            if (data && data.user) {
+                const user = data.user;
+                if (setUser) setUser(user);
 
                 // Enhanced role-based redirection
                 if (data.user.is_admin) {
                     navigate("/admin");
                 } else if (data.user.is_hr) {
                     // HR users go to talent section or return URL
-                    if (from && from !== "/") {
+                    if (from) {
                         navigate(from);
                     } else {
                         navigate("/talent");
                     }
                 } else if (data.user.is_mentor) {
                     // Mentor users go to mentor dashboard
-                    if (from && from !== "/") {
+                    if (from) {
                         navigate(from);
                     } else {
                         navigate("/mentor-dashboard");
                     }
                 } else {
                     // Normal users (students) go to skills section or return URL
-                    if (from && from !== "/") {
+                    if (from) {
                         navigate(from);
                     } else {
                         navigate("/skill");

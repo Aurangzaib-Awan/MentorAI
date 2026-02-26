@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { authAPI } from '@/services/api';
 import { Award, FileText, Users, Mail } from 'lucide-react';
 
 const Home = ({ user }) => {
@@ -45,9 +46,13 @@ const Home = ({ user }) => {
                       <p className="text-[rgb(148,163,184)] text-xs mt-1">{user.email || ''}</p>
                     </div>
                     <div className="p-2">
-                      <Link to="/skill" className="block px-3 py-2 text-sm text-[rgb(71,85,105)] hover:bg-[rgb(241,245,249)] rounded-lg transition-colors">Dashboard</Link>
                       <button
-                        onClick={() => {
+                        onClick={async () => {
+                          try {
+                            await authAPI.logout();
+                          } catch (err) {
+                            console.warn('Logout API failed', err);
+                          }
                           localStorage.removeItem('token');
                           localStorage.removeItem('user');
                           window.location.reload();
@@ -91,7 +96,7 @@ const Home = ({ user }) => {
             </div>
             <div className="space-y-3">
               <button
-                onClick={() => { setShowRegisterModal(false); navigate('/login'); }}
+                onClick={() => { setShowRegisterModal(false); navigate('/login', { state: { from: { pathname: '/' } } }); }}
                 className="w-full py-3 px-6 rounded-lg font-bold text-[rgb(15,23,42)] bg-[rgb(241,245,249)] hover:bg-[rgb(226,232,240)] transition-colors duration-300 text-base"
               >
                 Login
