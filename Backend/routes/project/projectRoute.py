@@ -9,33 +9,20 @@ import os
 from dotenv import load_dotenv
 import logging
 from utils.serializer import serialize_doc
-import subprocess, sys
 import re, json
 import random
 
 logger = logging.getLogger(__name__)
+
+# ── Load .env FIRST before anything reads environment variables ──────────────
 load_dotenv()
 
-GeminiClient = None
-try:
-    import google.generativeai as genai
-    api_key = os.getenv("GEMINI_API_KEY")
-    if api_key:
-        genai.configure(api_key=api_key)
-        GeminiClient = genai
-        logger.info("Google Generative AI configured successfully")
-except ImportError:
-    try:
-        logger.warning("google-generativeai not found, installing...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "google-generativeai"])
-        import google.generativeai as genai
-        api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
-            GeminiClient = genai
-    except Exception as install_exc:
-        logger.error(f"Failed to install google-generativeai: {install_exc}")
-        GeminiClient = None
+# ── Groq init (free, fast, no billing required) ──────────────────────────────
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if GROQ_API_KEY:
+    logger.info("✅ Groq API key loaded successfully")
+else:
+    logger.error("❌ GROQ_API_KEY not found in .env — get a free key at console.groq.com")
 
 
 router = APIRouter()
@@ -43,8 +30,8 @@ db = client["immersia"]
 project_collection          = db["projects"]
 user_projects_collection    = db["user_projects"]
 project_quizzes_collection  = db["project_quizzes"]
-submissions_collection      = db["project_submissions"]  # NEW
-certificates_collection     = db["certificates"]          # NEW
+submissions_collection      = db["project_submissions"]
+certificates_collection     = db["certificates"]
 
 
 # ============================================================================
@@ -80,37 +67,36 @@ class MentorActionRequest(BaseModel):
 
 # ============================================================================
 # CERTIFICATE HELPER
-# Called after quiz submit AND after mentor approve.
-# Issues certificate only when BOTH conditions are met.
 # ============================================================================
 def maybe_issue_certificate(user_id: str, project_id: str):
     try:
-        # 1. Check mentor approval
+        logger.info(f"🔍 Certificate check — user: {user_id}, project: {project_id}")
+
         submission = submissions_collection.find_one({
             "user_id": user_id, "project_id": project_id, "status": "approved"
         })
+        logger.info(f"  ↳ Submission approved: {submission is not None}")
         if not submission:
             return None
 
-        # 2. Check quiz passed >= 70%
         quiz = project_quizzes_collection.find_one({
             "user_id": user_id, "project_id": project_id, "is_completed": True
         })
+        logger.info(f"  ↳ Quiz completed: {quiz is not None}")
         if not quiz:
             return None
 
         total      = len(quiz.get("questions", []))
         score      = quiz.get("score", 0)
         percentage = round((score / total) * 100) if total > 0 else 0
+        logger.info(f"  ↳ Quiz score: {percentage}%")
         if percentage < 70:
             return None
 
-        # 3. Already issued?
         existing = certificates_collection.find_one({"user_id": user_id, "project_id": project_id})
         if existing:
             return serialize_doc(existing)
 
-        # 4. Resolve project metadata
         project = None
         try:
             project = user_projects_collection.find_one({"_id": ObjectId(project_id)})
@@ -126,7 +112,6 @@ def maybe_issue_certificate(user_id: str, project_id: str):
         technologies  = project.get("technologies", []) if project else []
         category      = project.get("category", "") if project else ""
 
-        # 5. Issue certificate
         cert_doc = {
             "user_id":        user_id,
             "project_id":     project_id,
@@ -148,24 +133,138 @@ def maybe_issue_certificate(user_id: str, project_id: str):
 
 
 # ============================================================================
-# GEMINI HELPER
+# HUGGINGFACE HELPER - free inference API with model fallback chain
 # ============================================================================
+
+# ============================================================================
+# GROQ HELPER - free inference API, no billing required
+# Get your free key at: console.groq.com
+# ============================================================================
+# Models in fallback order - all free on Groq
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",    # primary   - best quality, 70B
+    "llama-3.1-8b-instant",       # fallback1 - fast, 8B
+    "mixtral-8x7b-32768",         # fallback2 - 32k context
+    "gemma2-9b-it",               # fallback3 - Google Gemma
+]
+
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
 def call_gemini_json(prompt_text: str) -> Optional[str]:
-    try:
-        model = GeminiClient.GenerativeModel('gemini-2.0-flash')
-        resp  = model.generate_content(prompt_text)
-        text  = resp.text if hasattr(resp, 'text') else str(resp)
-        if not text:
-            return None
-        text = text.strip()
-        text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE).strip()
-        text = re.sub(r"^```\s*",     "", text, flags=re.IGNORECASE).strip()
-        text = re.sub(r"\s*```$",     "", text, flags=re.IGNORECASE).strip()
-        m = re.search(r"\{.*\}", text, re.DOTALL)
-        return m.group(0) if m else text
-    except Exception as e:
-        logger.warning(f"Gemini call error: {e}")
+    """
+    Calls Groq API using the groq Python SDK.
+    Groq is free with no billing required - get key at console.groq.com
+    Named call_gemini_json to avoid changing all call sites.
+    """
+    if not GROQ_API_KEY:
+        logger.error("GROQ_API_KEY not set - cannot call Groq API")
         return None
+
+    # Lazy import groq SDK - install if missing
+    try:
+        from groq import Groq
+    except ImportError:
+        try:
+            import subprocess, sys
+            logger.info("Installing groq SDK...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "groq"], stdout=subprocess.DEVNULL)
+            from groq import Groq
+        except Exception as e:
+            logger.error(f"Failed to install groq SDK: {e}")
+            return None
+
+    client = Groq(api_key=GROQ_API_KEY)
+
+    for model_name in GROQ_MODELS:
+        try:
+            logger.info(f"Trying Groq model: {model_name}")
+
+            chat = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {
+                        "role":    "system",
+                        "content": "You are a helpful assistant. Respond ONLY with valid JSON. No markdown, no explanations, no text outside the JSON object."
+                    },
+                    {
+                        "role":    "user",
+                        "content": prompt_text
+                    }
+                ],
+                max_tokens=3000,
+                temperature=0.7,
+            )
+
+            text = chat.choices[0].message.content or ""
+
+            if not text.strip():
+                logger.warning(f"{model_name} returned empty content")
+                continue
+
+            text = text.strip()
+            logger.debug(f"{model_name} response (first 300): {text[:300]}")
+
+            # Strip markdown fences if model added them
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+            text = re.sub(r"\s*```\s*$",       "", text, flags=re.IGNORECASE).strip()
+
+            # Skip leading prose before JSON
+            brace_idx = text.find("{")
+            if brace_idx > 0:
+                text = text[brace_idx:]
+
+            extracted = _extract_json_object(text)
+            if extracted:
+                logger.info(f"✅ Groq/{model_name} succeeded")
+                return extracted
+
+            logger.warning(f"{model_name} response had no valid JSON")
+            continue
+
+        except Exception as e:
+            err = str(e)
+            if "rate_limit" in err.lower() or "429" in err:
+                logger.warning(f"{model_name} rate limited - trying next model")
+                continue
+            if "model_not_found" in err.lower() or "404" in err:
+                logger.warning(f"{model_name} not found - trying next model")
+                continue
+            logger.warning(f"{model_name} error: {e}")
+            continue
+
+    logger.error("All Groq models failed")
+    return None
+
+
+def _extract_json_object(text: str) -> Optional[str]:
+    """
+    Extract the outermost JSON object by counting braces.
+    More reliable than a greedy regex for nested structures.
+    """
+    if not text or text[0] != "{":
+        return None
+    depth   = 0
+    in_str  = False
+    escape  = False
+    for i, ch in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_str:
+            escape = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[:i + 1]
+    return None  # unbalanced braces = truncated response
 
 
 # ============================================================================
@@ -192,100 +291,79 @@ APP_DOMAINS = [
 
 @router.post("/api/generate-project")
 async def generate_project(request: GenerateProjectRequest):
-    global GeminiClient
-    if GeminiClient is None:
-        raise HTTPException(status_code=500, detail="google-generativeai not configured")
-    if not os.getenv("GEMINI_API_KEY"):
-        raise HTTPException(status_code=500, detail="Gemini API key not configured")
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY not set. Get a free key at console.groq.com and add to .env")
 
     difficulty = request.difficulty or "Intermediate"
     skills_str = ", ".join(request.skills)
     domain     = random.choice(APP_DOMAINS)
 
-    master_prompt = f"""You are a senior software engineer and technical mentor at a top bootcamp.
+    # ── Shorter, tighter prompt — reduces truncation risk ───────────────────
+    master_prompt = f"""You are a senior software engineer. Generate a specific, named portfolio project.
 
-A student wants a hands-on portfolio project. Their skills: {skills_str}. Difficulty: {difficulty}.
+Student skills: {skills_str}
+Difficulty: {difficulty}
+Domain: {domain}
 
-STEP 1 — INVENT A SPECIFIC APP (do this mentally before writing JSON):
-Think of a concrete, named real-world application in the domain of: {domain}
-The app must:
-- Have a specific name (e.g. "ShiftMate — Employee Shift Scheduler" not just "scheduling app")
-- Solve a clear, relatable problem that real users actually face
-- Be completely buildable using: {skills_str}
-- Be scoped appropriately for {difficulty} level (not too simple, not impossible)
+Rules:
+- Title must be a SPECIFIC app name (e.g. "ShiftMate — Employee Shift Scheduler")
+- NEVER write generic titles like "A web application using X"
+- technologies must be a JSON array of real package names
+- tasks must be a JSON array of exactly 10 strings
+- category must be exactly one of: Web Development | Mobile Development | Data Science | Machine Learning | Cloud Computing | DevOps | Cyber Security | Artificial Intelligence | Blockchain | Game Development
+- duration must be exactly one of: 1 week | 2 weeks | 3 weeks | 1 month | 2 months | 3 months | 6 months
 
-Examples of GOOD specific app ideas:
-- "SplitEase — A bill-splitting app for roommates that tracks shared expenses and sends payment reminders"
-- "HireFlow — A job application tracker where candidates log interviews, follow-ups, and offer statuses"
-- "MenuMate — A restaurant menu builder where owners create digital menus with QR code generation"
-- "GrowthLog — A plant care tracker that reminds users when to water, fertilize, and repot their plants"
-
-Examples of BAD generic ideas (NEVER do this):
-- "A Python web application" ❌
-- "A React project" ❌
-- "A web app using MongoDB" ❌
-- "A CRUD application" ❌
-
-STEP 2 — RETURN JSON for the specific app you invented in Step 1.
-
-RETURN ONLY valid JSON. No markdown fences. No explanation. Start with {{ end with }}
+Return ONLY this JSON with no extra text:
 
 {{
-  "title": "AppName — One-line description of what it does (e.g. ShiftMate — Employee Shift Scheduler)",
-  "description": "2-3 sentences explaining the real-world problem this app solves, who uses it, and what makes it valuable. Write as if pitching to a user, not describing a coding exercise.",
-  "category": "Exactly one of: Web Development | Mobile Development | Data Science | Machine Learning | Cloud Computing | DevOps | Cyber Security | Artificial Intelligence | Blockchain | Game Development",
+  "title": "AppName — one-line what it does",
+  "description": "2-3 sentences: real problem it solves, who uses it, what makes it valuable",
+  "category": "Web Development",
   "difficulty": "{difficulty}",
-  "duration": "Exactly one of: 1 week | 2 weeks | 3 weeks | 1 month | 2 months | 3 months | 6 months",
-  "technologies": ["List actual library/framework names used to build THIS app", "Must include: {skills_str}", "Add supporting tools naturally needed (e.g. JWT, bcrypt, Axios, etc)", "4 to 8 items"],
-  "prerequisites": [
-    "Specific skill the student needs before starting",
-    "Another prerequisite directly relevant to {skills_str}",
-    "Third prerequisite — minimum 3, maximum 5"
-  ],
-  "project_description": "## What You're Building\\nDescribe the specific app in 3-4 sentences.\\n\\n## Core Features\\n- **Feature 1**: What it does\\n- **Feature 2**: What it does\\n- **Feature 3**: What it does\\n- **Feature 4**: What it does\\n- **Feature 5**: What it does\\n\\n## Technical Architecture\\n- **Frontend**: framework and usage\\n- **Backend**: framework and API description\\n- **Database**: DB and data stored\\n- **Auth**: login method and roles\\n\\n## What You'll Build Step by Step\\n1. Project setup\\n2. Database schema\\n3. Authentication\\n4. Primary feature\\n5. Secondary feature\\n6. Frontend UI\\n7. Validation and error handling\\n8. Tests\\n9. Deployment\\n10. Documentation\\n\\n## Who This Is For\\nDescribe the real end-user.",
+  "duration": "1 month",
+  "technologies": ["{skills_str.split(',')[0].strip()}", "add 3-7 more real packages needed"],
+  "prerequisites": ["prerequisite 1", "prerequisite 2", "prerequisite 3"],
+  "project_description": "## What You're Building\\n3-4 sentences.\\n\\n## Core Features\\n- Feature 1\\n- Feature 2\\n- Feature 3\\n- Feature 4\\n- Feature 5\\n\\n## Technical Architecture\\n- Frontend: ...\\n- Backend: ...\\n- Database: ...\\n- Auth: ...",
   "tasks": [
-    "Initialize the project: create repo, set up {skills_str} project structure, install all dependencies",
-    "Design the database schema: define collections/tables with all required fields and relationships",
-    "Build user authentication: registration, login, password hashing with bcrypt, JWT token issuance and validation",
-    "Implement [primary feature name]: specific description",
-    "Implement [secondary feature name]: specific description",
-    "Implement [third feature name]: specific description",
-    "Build the frontend: describe specific pages/screens and UI components",
-    "Add input validation, API error responses, and handle edge cases",
-    "Write tests: unit tests and integration tests for critical endpoints",
-    "Deploy to cloud platform with environment variables, CI/CD, and README"
+    "Initialize project and install dependencies",
+    "Design database schema",
+    "Build authentication system",
+    "Implement core feature 1",
+    "Implement core feature 2",
+    "Implement core feature 3",
+    "Build frontend UI",
+    "Add validation and error handling",
+    "Write tests",
+    "Deploy and write README"
   ],
-  "learning_outcomes": "After completing this project you will:\\n- Know how to build [specific thing] using {skills_str}\\n- Understand [architectural pattern]\\n- Be able to implement [technical challenge]\\n- Have a deployed, working app to show in your portfolio\\n- Understand how to test and document a production-ready application"
-}}
-
-ABSOLUTE RULES:
-1. The title must name a SPECIFIC app
-2. The description must describe a real user problem
-3. Tasks 4, 5, 6, 7 must reference THIS app's specific features by name
-4. technologies must be a JSON array of real package names
-5. prerequisites must be a JSON array of strings
-6. tasks must be a JSON array of exactly 10 strings
-7. category and duration must match the exact allowed values listed above
-8. NEVER write "a web application using X" — always name the specific app and its purpose"""
+  "learning_outcomes": "After completing this you will:\\n- outcome 1\\n- outcome 2\\n- outcome 3"
+}}"""
 
     generated = call_gemini_json(master_prompt)
     parsed    = None
 
     for attempt in range(3):
         if generated is None:
+            logger.warning(f"Project generation attempt {attempt + 1}: Gemini returned None")
             break
         try:
             parsed = json.loads(generated)
             if parsed.get("title") and parsed.get("tasks") and parsed.get("description"):
+                logger.info(f"✅ Project generated successfully on attempt {attempt + 1}: {parsed.get('title')}")
                 break
-            raise ValueError("Missing required fields")
-        except Exception as e:
-            logger.debug(f"Project parse attempt {attempt + 1} failed: {e}")
+            raise ValueError(f"Missing required fields: title={bool(parsed.get('title'))}, tasks={bool(parsed.get('tasks'))}")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Project JSON parse attempt {attempt + 1} failed: {e}")
+            logger.debug(f"Raw text that failed parsing: {generated[:500] if generated else 'None'}")
+            parsed = None
             if attempt < 2:
                 generated = call_gemini_json(
-                    "CRITICAL: Return ONLY raw JSON. No markdown. No backticks. "
-                    "Start with { end with }\n\n" + master_prompt
+                    "Return ONLY valid JSON, nothing else. No markdown. No explanation.\n\n" + master_prompt
                 )
+        except ValueError as e:
+            logger.warning(f"Project validation attempt {attempt + 1} failed: {e}")
+            if attempt < 2:
+                generated = call_gemini_json(master_prompt)
 
     if parsed is None:
         logger.warning("All Gemini attempts failed — using structured fallback")
@@ -304,12 +382,8 @@ ABSOLUTE RULES:
             ],
             "project_description": (
                 "## What You're Building\nTaskFlow is a team task management web app.\n\n"
-                "## Core Features\n- **Workspace Management**: Create workspaces and invite members\n"
-                "- **Task CRUD**: Create, assign, prioritize tasks\n- **Kanban Board**: Drag-and-drop columns\n"
-                "- **Activity Feed**: Real-time log\n- **Dashboard**: Summary view\n\n"
-                "## Technical Architecture\n- **Frontend**: React\n- **Backend**: REST API\n"
-                "- **Database**: MongoDB\n- **Auth**: JWT\n\n"
-                "## Who This Is For\nSmall teams needing a lightweight Jira/Trello alternative."
+                "## Core Features\n- Workspace Management\n- Task CRUD\n- Kanban Board\n- Activity Feed\n- Dashboard\n\n"
+                "## Technical Architecture\n- Frontend: React\n- Backend: REST API\n- Database: MongoDB\n- Auth: JWT"
             ),
             "tasks": [
                 f"Initialize project: create repo, set up {skills_str} structure, install dependencies",
@@ -326,9 +400,7 @@ ABSOLUTE RULES:
             "learning_outcomes": (
                 f"After completing this project you will:\n- Know how to build a multi-user SaaS tool using {skills_str}\n"
                 "- Understand role-based access control and JWT authentication\n"
-                "- Be able to implement drag-and-drop Kanban boards\n"
-                "- Have a deployed, working app for your portfolio\n"
-                "- Understand how to test and document a production-ready application"
+                "- Have a deployed, working app for your portfolio"
             )
         }
 
@@ -337,9 +409,7 @@ ABSOLUTE RULES:
         'Cloud Computing', 'DevOps', 'Cyber Security', 'Artificial Intelligence',
         'Blockchain', 'Game Development'
     ]
-    ALLOWED_DURATIONS = [
-        '1 week', '2 weeks', '3 weeks', '1 month', '2 months', '3 months', '6 months'
-    ]
+    ALLOWED_DURATIONS = ['1 week', '2 weeks', '3 weeks', '1 month', '2 months', '3 months', '6 months']
 
     category = parsed.get("category", "Web Development")
     if category not in ALLOWED_CATEGORIES:
@@ -419,10 +489,8 @@ ABSOLUTE RULES:
         "generated_by_user":   request.user_id,
         "user_project_id":     str(user_result.inserted_id),
     }
-
     try:
         project_collection.insert_one(curated_doc)
-        logger.info(f"Project '{title}' also saved to curated projects collection")
     except Exception as e:
         logger.warning(f"projects collection insert failed (non-fatal): {e}")
 
@@ -434,11 +502,8 @@ ABSOLUTE RULES:
 # ============================================================================
 @router.post("/api/generate-quiz")
 async def generate_quiz(request: GenerateQuizRequest):
-    global GeminiClient
-    if GeminiClient is None:
-        raise HTTPException(status_code=500, detail="google-generativeai not configured")
-    if not os.getenv("GEMINI_API_KEY"):
-        raise HTTPException(status_code=500, detail="Gemini API key not configured")
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="GROQ_API_KEY not set. Get a free key at console.groq.com and add to .env")
 
     proj = None
     try:
@@ -461,97 +526,80 @@ async def generate_quiz(request: GenerateQuizRequest):
     if not proj:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    title         = proj.get('title', proj.get('project_title', 'Unknown Project'))
-    description   = proj.get('description', '')
-    proj_desc     = proj.get('project_description', '')
-    technologies  = proj.get('technologies', proj.get('skills', []))
-    tasks         = proj.get('tasks', [])
-    prerequisites = proj.get('prerequisites', [])
-    difficulty    = proj.get('difficulty', 'Intermediate')
-    category      = proj.get('category', '')
-    duration      = proj.get('duration', '')
-    outcomes      = proj.get('learning_outcomes', '')
-    tech_str      = ', '.join(technologies) if isinstance(technologies, list) else str(technologies)
+    title        = proj.get('title', proj.get('project_title', 'Unknown Project'))
+    technologies = proj.get('technologies', proj.get('skills', []))
+    tasks        = proj.get('tasks', [])
+    difficulty   = proj.get('difficulty', 'Intermediate')
+    tech_str     = ', '.join(technologies) if isinstance(technologies, list) else str(technologies)
+    proj_desc    = proj.get('project_description', '')
+    description  = proj.get('description', '')
 
-    ctx = [
-        f"Project Title: {title}", f"Category: {category}",
-        f"Difficulty: {difficulty}", f"Duration: {duration}",
-        f"Technologies: {tech_str}", f"Short Description: {description}",
-    ]
-    if proj_desc:
-        ctx.append(f"Full Project Description:\n{proj_desc[:1200]}")
-    if tasks:
-        ctx.append("Implementation Tasks:")
-        for i, t in enumerate(tasks[:10], 1):
-            ctx.append(f"  {i}. {t}")
-    if prerequisites:
-        ctx.append(f"Prerequisites: {', '.join(prerequisites)}")
-    if outcomes:
-        ctx.append(f"Learning Outcomes: {outcomes[:300]}")
+    # ── Concise context to avoid truncation ─────────────────────────────────
+    task_lines = "\n".join(f"  {i+1}. {t}" for i, t in enumerate(tasks[:10]))
+    context = f"""Project: {title}
+Difficulty: {difficulty}
+Technologies: {tech_str}
+Description: {description}
+Tasks:
+{task_lines}"""
 
-    full_context = "\n".join(ctx)
+    quiz_prompt = f"""You are a technical instructor. Write exactly 10 multiple-choice quiz questions about this project.
 
-    quiz_prompt = f"""You are a senior technical instructor writing a graded quiz.
+{context}
 
-PROJECT BEING ASSESSED:
-{full_context}
+Rules:
+- Every question must reference "{title}" or its specific features/tasks
+- correct_answer must be exactly one of: "A", "B", "C", "D"
+- Each option starts with its letter: "A) ...", "B) ..."
+- Include explanation for why correct answer is right
 
-Write exactly 10 multiple-choice questions that test whether a student actually built and understood this specific project.
-
-COVERAGE:
-- Q1-Q2: Project setup, architecture decisions, and configuration specific to {title}
-- Q3-Q4: How the core features of {title} are implemented using {tech_str}
-- Q5-Q6: Specific {tech_str} APIs, patterns, and methods used in this project
-- Q7-Q8: Error handling, validation, security, and edge cases in {title}
-- Q9: Testing and deployment decisions made for {title}
-- Q10: A debugging or decision-making scenario in {title}
-
-RULES:
-- Every question must reference "{title}" or its specific features
-- Wrong options must be plausible
-- correct_answer is exactly one of: "A", "B", "C", "D"
-- Each option starts with its letter: "A) ...", "B) ...", "C) ...", "D) ..."
-- explanation must say WHY correct is right AND why others are wrong
-
-RETURN ONLY valid JSON. No markdown. No backticks. Start {{ end }}
+Return ONLY this JSON:
 
 {{
   "questions": [
     {{
       "id": 1,
-      "question": "Question referencing {title}?",
+      "question": "question text about {title}?",
       "options": ["A) option", "B) option", "C) option", "D) option"],
       "correct_answer": "A",
-      "explanation": "A is correct because... B is wrong because... C is wrong because... D is wrong because..."
+      "explanation": "A is correct because..."
     }}
   ]
 }}
 
-Generate ALL 10 questions now."""
+Write all 10 questions now. Cover: setup, core features, {tech_str} usage, error handling, deployment."""
 
     generated = call_gemini_json(quiz_prompt)
     parsed    = None
 
     for attempt in range(3):
         if generated is None:
+            logger.warning(f"Quiz generation attempt {attempt + 1}: Gemini returned None")
             break
         try:
             parsed = json.loads(generated)
             if "questions" in parsed and len(parsed["questions"]) >= 5:
+                logger.info(f"✅ Quiz generated on attempt {attempt + 1}: {len(parsed['questions'])} questions for '{title}'")
                 break
             raise ValueError(f"Only {len(parsed.get('questions', []))} questions")
-        except Exception as e:
-            logger.debug(f"Quiz parse attempt {attempt + 1} failed: {e}")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Quiz JSON parse attempt {attempt + 1} failed: {e}")
+            logger.debug(f"Raw text: {generated[:300] if generated else 'None'}")
+            parsed = None
             if attempt < 2:
                 generated = call_gemini_json(
-                    "CRITICAL: Return ONLY raw JSON. No markdown. No backticks. "
-                    "Start with { end with }\n\n" + quiz_prompt
+                    "Return ONLY valid JSON, nothing else.\n\n" + quiz_prompt
                 )
+        except ValueError as e:
+            logger.warning(f"Quiz validation attempt {attempt + 1}: {e}")
+            if attempt < 2:
+                generated = call_gemini_json(quiz_prompt)
 
     if parsed is None or "questions" not in parsed:
+        logger.warning(f"Quiz fallback used for project: {title}")
         tech_list = technologies if isinstance(technologies, list) else [str(technologies)]
-        t0        = tech_list[0] if tech_list else "the primary technology"
-        parsed    = {"questions": [
+        t0 = tech_list[0] if tech_list else "the primary technology"
+        parsed = {"questions": [
             {"id":1,"question":f"In {title}, what is the primary responsibility of {t0}?","options":["A) Managing application state and rendering the UI","B) Handling file uploads to cloud storage","C) Sending transactional emails to users","D) Running scheduled background jobs"],"correct_answer":"A","explanation":f"{t0} manages state and rendering. Others are separate services."},
             {"id":2,"question":f"Which setup step is required before running {title} locally?","options":["A) Run directly without configuration","B) Copy .env.example to .env and fill in values","C) Hard-code credentials in source files","D) Disable authentication"],"correct_answer":"B","explanation":"Environment variables must be configured first."},
             {"id":3,"question":f"How are passwords stored in {title}?","options":["A) Plain text","B) Base64 encoded","C) Hashed with bcrypt and a salt","D) AES-256 encrypted"],"correct_answer":"C","explanation":"bcrypt with salt is the industry standard."},
@@ -608,7 +656,7 @@ Generate ALL 10 questions now."""
 
 
 # ============================================================================
-# STANDARD PROJECT ROUTES (unchanged from original)
+# STANDARD PROJECT ROUTES
 # ============================================================================
 @router.get("/projects")
 async def get_projects():
@@ -704,7 +752,7 @@ async def get_projects_by_difficulty(difficulty: str):
 
 
 # ============================================================================
-# QUIZ SUBMIT — now triggers certificate check
+# QUIZ SUBMIT
 # ============================================================================
 @router.post("/api/quiz/submit")
 async def submit_quiz(sub: QuizSubmission):
@@ -740,7 +788,6 @@ async def submit_quiz(sub: QuizSubmission):
         }}
     )
 
-    # Try to issue certificate now that quiz is complete
     project_id  = quiz_doc.get("project_id", "")
     certificate = maybe_issue_certificate(sub.user_id, project_id)
 
@@ -748,12 +795,12 @@ async def submit_quiz(sub: QuizSubmission):
         "score":       score,
         "total":       len(quiz_doc.get("questions", [])),
         "results":     results,
-        "certificate": certificate,  # None if mentor hasn't approved yet
+        "certificate": certificate,
     }
 
 
 # ============================================================================
-# PROJECT SUBMISSION — user submits for mentor review
+# PROJECT SUBMISSION
 # ============================================================================
 @router.post("/api/projects/submit")
 async def submit_project(request: ProjectSubmissionRequest):
@@ -763,7 +810,7 @@ async def submit_project(request: ProjectSubmissionRequest):
         "status":     {"$in": ["pending", "approved"]}
     })
     if existing:
-        raise HTTPException(status_code=409, detail="You have already submitted this project. Wait for mentor review.")
+        raise HTTPException(status_code=409, detail="You have already submitted this project.")
 
     doc = {
         "user_id":       request.user_id,
@@ -776,7 +823,6 @@ async def submit_project(request: ProjectSubmissionRequest):
         "status":        "pending",
         "submitted_at":  datetime.now(timezone.utc),
     }
-
     try:
         result               = submissions_collection.insert_one(doc)
         doc["_id"]           = result.inserted_id
@@ -789,7 +835,7 @@ async def submit_project(request: ProjectSubmissionRequest):
 
 
 # ============================================================================
-# GET ALL SUBMISSIONS — mentor dashboard
+# GET ALL SUBMISSIONS
 # ============================================================================
 @router.get("/api/submissions")
 async def get_all_submissions():
@@ -824,7 +870,6 @@ async def approve_submission(submission_id: str, body: MentorActionRequest):
             "reason":      body.reason,
         }}
     )
-
     certificate = maybe_issue_certificate(doc.get("user_id", ""), doc.get("project_id", ""))
     return {"message": "Submission approved", "certificate": certificate}
 
@@ -868,7 +913,7 @@ async def get_user_certificates(user_id: str):
 
 
 # ============================================================================
-# USER PROJECT ROUTES (unchanged from original)
+# USER PROJECT ROUTES
 # ============================================================================
 @router.patch("/api/projects/{project_id}/complete")
 async def complete_user_project(project_id: str):
