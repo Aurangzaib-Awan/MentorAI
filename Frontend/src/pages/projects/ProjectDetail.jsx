@@ -12,52 +12,33 @@ const ProjectDetail = ({ user }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Function to render markdown to HTML
   const renderMarkdown = (text) => {
     if (!text) return '';
-
     return text
-      // Headers
       .replace(/^### (.*$)/gim, '<h3 class="text-lg font-bold text-[rgb(15,23,42)] mt-6 mb-3">$1</h3>')
       .replace(/^## (.*$)/gim, '<h2 class="text-xl font-bold text-[rgb(15,23,42)] mt-7 mb-4">$1</h2>')
       .replace(/^# (.*$)/gim, '<h1 class="text-2xl font-bold text-[rgb(15,23,42)] mt-8 mb-5">$1</h1>')
-      // Bold and Italic
       .replace(/\*\*(.*?)\*\*/gim, '<strong class="font-bold text-[rgb(15,23,42)]">$1</strong>')
       .replace(/\*(.*?)\*/gim, '<em class="italic text-[rgb(71,85,105)]">$1</em>')
-      // Lists
       .replace(/^- (.*$)/gim, '<li class="ml-6 text-[rgb(71,85,105)] mb-1">$1</li>')
       .replace(/(<li.*?<\/li>)/gims, '<ul class="list-disc mb-4">$1</ul>')
-      // Line breaks
       .replace(/\n\n/g, '</p><p class="mb-4">')
       .replace(/\n/g, '<br>')
-      // Code
       .replace(/`(.*?)`/g, '<code class="bg-[rgb(241,245,249)] px-2 py-1 rounded text-sm font-mono text-[rgb(37,99,235)]">$1</code>')
-      // Wrap in paragraph if no other block elements
       .replace(/^(?!<[hu])(.*)$/gim, '<p class="mb-4 text-[rgb(71,85,105)] leading-relaxed">$1</p>');
   };
 
-  // Fetch project details from backend
   useEffect(() => {
     const fetchProject = async () => {
       try {
         setLoading(true);
-        // Get all projects and find the specific one
         const response = await projectAPI.getProjects();
-
-        // Handle different response formats (same as ProjectsMarketplace)
         const projectsArray = response.projects || response.data || response || [];
-
-        console.log('Projects array in ProjectDetail:', projectsArray); // Debug log
-
-        // Make sure projectId comparison works (convert to string if needed)
+        console.log('Projects array in ProjectDetail:', projectsArray);
         const foundProject = projectsArray.find(p =>
           p.id.toString() === projectId || p.id === projectId
         );
-
-        if (!foundProject) {
-          throw new Error('Project not found');
-        }
-
+        if (!foundProject) throw new Error('Project not found');
         setProject(foundProject);
       } catch (err) {
         setError('Failed to load project details. Please try again later.');
@@ -66,7 +47,6 @@ const ProjectDetail = ({ user }) => {
         setLoading(false);
       }
     };
-
     fetchProject();
   }, [projectId]);
 
@@ -81,16 +61,15 @@ const ProjectDetail = ({ user }) => {
 
   const handleStartProject = () => {
     if (!user) {
-      // Redirect to login if not authenticated
       navigate('/login', { state: { from: location } });
       return;
     }
-    // Navigate to workspace if authenticated
     navigate(`/projects/${projectId}/workspace`);
   };
 
   const handleTakeQuiz = () => {
     if (!user) {
+
       navigate('/login', { state: { from: location } });
       return;
     }
@@ -171,17 +150,30 @@ const ProjectDetail = ({ user }) => {
                   </span>
                 </div>
 
+                {/* Start Project — solid blue, inverts to white+blue-border on hover */}
                 <button
                   onClick={handleStartProject}
-                  className="w-full bg-[rgb(37,99,235)] hover:bg-[rgb(29,78,216)] text-white font-semibold py-4 px-6 rounded-lg transition-all duration-300 mb-4"
+                  className="
+                    w-full font-semibold py-4 px-6 rounded-lg mb-4
+                    border-2 border-[rgb(37,99,235)]
+                    bg-[rgb(37,99,235)] text-white
+                   
+                    transition-all duration-200
+                  "
                 >
-                  {user ? "Start Project" : "Login to Start Project"}
+                  {user ? 'Start Project' : 'Login to Start Project'}
                 </button>
 
+                {/* Take Quiz — outline white+blue-text, inverts to solid blue on hover */}
                 {user && (
                   <button
                     onClick={handleTakeQuiz}
-                    className="w-full bg-[rgb(16,185,129)] hover:bg-[rgb(5,150,105)] text-white font-semibold py-4 px-6 rounded-lg transition-all duration-300 mb-4"
+                    className="
+                      w-full font-semibold py-4 px-6 rounded-lg mb-4
+                      border-2 border-[rgb(37,99,235)]
+                      bg-white text-[rgb(37,99,235)]
+                      transition-all duration-200
+                    "
                   >
                     Take Quiz
                   </button>
@@ -267,7 +259,7 @@ const ProjectDetail = ({ user }) => {
           </div>
         </div>
       </div>
-    </div >
+    </div>
   );
 };
 

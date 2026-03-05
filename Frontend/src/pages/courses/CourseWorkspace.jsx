@@ -76,9 +76,6 @@ const CourseWorkspace = () => {
     }));
   };
 
-  const handleTakeQuiz = () => {
-    navigate(`/courses/${courseId}/quiz`);
-  };
 
   return (
     <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)] p-6">
@@ -96,12 +93,7 @@ const CourseWorkspace = () => {
               <BookOpen className="w-5 h-5" />
               <span>Self-Paced Learning</span>
             </div>
-            <button
-              onClick={handleTakeQuiz}
-              className="bg-[rgb(37,99,235)] hover:bg-[rgb(29,78,216)] text-white font-semibold py-2 px-6 rounded-lg transition-all duration-300"
-            >
-              Take Quiz
-            </button>
+
           </div>
         </div>
 

@@ -1,7 +1,7 @@
 // components/ProjectsMarketplace.jsx
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Search, Clock, Users } from 'lucide-react';
+import { Search, Clock, Users, Sparkles, ArrowRight, Zap } from 'lucide-react';
 import { projectAPI } from '../../services/api';
 
 const ProjectsMarketplace = ({ user }) => {
@@ -18,62 +18,49 @@ const ProjectsMarketplace = ({ user }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Fetch projects from backend
-  // Fetch projects from backend
   useEffect(() => {
     const fetchProjects = async () => {
       try {
         setLoading(true);
         const response = await projectAPI.getProjects();
-
-        // Extract projects array from response (same as ProjectManagement)
         const projectsArray = response.projects || response.data || response || [];
-
-        console.log('Projects data:', projectsArray); // Debug log
-
+        console.log('Projects data:', projectsArray);
         setProjects(projectsArray);
         setFilteredProjects(projectsArray);
       } catch (err) {
         setError('Failed to load projects. Please try again later.');
         console.error('Error fetching projects:', err);
-        // Set to empty arrays on error
         setProjects([]);
         setFilteredProjects([]);
       } finally {
         setLoading(false);
       }
     };
-
     fetchProjects();
   }, []);
 
   const handleFilterChange = useCallback((filterType, value) => {
     const newFilters = { ...filters, [filterType]: value };
     setFilters(newFilters);
-
     let filtered = projects;
-
     if (newFilters.searchQuery) {
       filtered = filtered.filter(project =>
         project.title?.toLowerCase().includes(newFilters.searchQuery.toLowerCase()) ||
-        project.description?.toLowerCase().includes(newFilters.searchQuery.toLowerCase()) || // Changed from shortDescription
-        project.technologies?.some(tech => // Changed from technologiesUsed
+        project.description?.toLowerCase().includes(newFilters.searchQuery.toLowerCase()) ||
+        project.technologies?.some(tech =>
           tech.toLowerCase().includes(newFilters.searchQuery.toLowerCase())
         )
       );
     }
-
     if (newFilters.difficulty) {
-      filtered = filtered.filter(project => project.difficulty === newFilters.difficulty); // Changed from difficultyLevel
+      filtered = filtered.filter(project => project.difficulty === newFilters.difficulty);
     }
-
     if (newFilters.duration) {
       filtered = filtered.filter(project => {
-        const durationWeeks = parseInt(project.duration) || 0; // Changed from estimatedDuration
+        const durationWeeks = parseInt(project.duration) || 0;
         return durationWeeks <= parseInt(newFilters.duration);
       });
     }
-
     setFilteredProjects(filtered);
   }, [filters, projects]);
 
@@ -136,22 +123,70 @@ const ProjectsMarketplace = ({ user }) => {
   return (
     <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)] p-6">
       <div className="max-w-7xl mx-auto">
-        <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-[rgb(37,99,235)] mb-4">
-            Project Marketplace
-          </h1>
-          <p className="text-[rgb(71,85,105)] text-lg">
-            Build real-world projects, collaborate with peers, and showcase your skills
-          </p>
-          <button
-            onClick={handleGenerateClick}
-            className="mt-4 bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg transition-colors duration-300"
+
+        {/* ── Hero Header ─────────────────────────────────────────────────── */}
+        <div className="mb-10">
+          {/* Title row */}
+          <div className="text-center mb-8">
+            <h1 className="text-4xl font-bold text-[rgb(37,99,235)] mb-3">
+              Project Marketplace
+            </h1>
+            <p className="text-[rgb(71,85,105)] text-lg">
+              Build real-world projects, collaborate with peers, and showcase your skills
+            </p>
+          </div>
+
+          {/* Generate Project CTA Banner */}
+          <div
+            style={{
+              background: 'linear-gradient(135deg, rgb(37,99,235) 0%, rgb(79,70,229) 100%)',
+            }}
+            className="rounded-2xl p-px"
           >
-            Generate Custom Project
-          </button>
+            <div
+              style={{
+                background: 'linear-gradient(135deg, rgb(37,99,235) 0%, rgb(79,70,229) 100%)',
+              }}
+              className="rounded-2xl px-8 py-6 flex flex-col md:flex-row items-center justify-between gap-6"
+            >
+              {/* Left: icon + copy */}
+              <div className="flex items-center gap-5">
+                <div className="w-14 h-14 rounded-xl bg-white/15 flex items-center justify-center flex-shrink-0">
+                  <Sparkles className="w-7 h-7 text-white" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-white font-bold text-lg leading-tight">
+                      Generate a Custom Project
+                    </span>
+                    <span
+                      className="text-xs font-semibold px-2 py-0.5 rounded-full"
+                      style={{ background: 'rgba(255,255,255,0.2)', color: 'white' }}
+                    >
+                      AI-Powered
+                    </span>
+                  </div>
+                  <p className="text-blue-100 text-sm leading-snug max-w-md">
+                    Tell us your skills and get a tailored, real-world project idea with full
+                    tasks, architecture, and a quiz — built just for you.
+                  </p>
+                </div>
+              </div>
+
+              {/* Right: CTA button */}
+              <button
+                onClick={handleGenerateClick}
+                className="flex-shrink-0 flex items-center gap-2 bg-white text-[rgb(37,99,235)] font-semibold px-6 py-3 rounded-xl hover:bg-blue-50 transition-all duration-200 shadow-md hover:shadow-lg group"
+              >
+                <Zap className="w-4 h-4 group-hover:scale-110 transition-transform duration-200" />
+                {user ? 'Generate My Project' : 'Get Started Free'}
+                <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform duration-200" />
+              </button>
+            </div>
+          </div>
         </div>
 
-        {/* Filter section */}
+        {/* ── Filters ─────────────────────────────────────────────────────── */}
         <div className="border border-[rgb(226,232,240)] rounded-xl mb-8">
           <div className="bg-white rounded-xl p-6">
             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -167,7 +202,6 @@ const ProjectsMarketplace = ({ user }) => {
                   />
                 </div>
               </div>
-
               <select
                 className="bg-white border border-[rgb(226,232,240)] rounded-lg px-4 py-3 text-[rgb(15,23,42)] focus:border-[rgb(37,99,235)] focus:ring-2 focus:ring-[rgb(37,99,235)]/20 transition-all duration-300"
                 value={filters.difficulty}
@@ -178,7 +212,6 @@ const ProjectsMarketplace = ({ user }) => {
                 <option value="Intermediate">Intermediate</option>
                 <option value="Advanced">Advanced</option>
               </select>
-
               <select
                 className="bg-white border border-[rgb(226,232,240)] rounded-lg px-4 py-3 text-[rgb(15,23,42)] focus:border-[rgb(37,99,235)] focus:ring-2 focus:ring-[rgb(37,99,235)]/20 transition-all duration-300"
                 value={filters.duration}
@@ -193,7 +226,7 @@ const ProjectsMarketplace = ({ user }) => {
           </div>
         </div>
 
-        {/* Projects Grid */}
+        {/* ── Projects Grid ───────────────────────────────────────────────── */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredProjects.map((project) => (
             <div
@@ -209,15 +242,12 @@ const ProjectsMarketplace = ({ user }) => {
                   {project.difficulty}
                 </span>
               </div>
-
               <h3 className="text-xl font-bold text-[rgb(15,23,42)] mb-3 group-hover:text-[rgb(37,99,235)] transition-colors duration-300">
                 {project.title}
               </h3>
               <p className="text-[rgb(71,85,105)] text-sm mb-4 line-clamp-2">
                 {project.description}
               </p>
-
-              {/* Technologies */}
               <div className="flex flex-wrap gap-2 mb-4">
                 {project.technologies?.map((tech, index) => (
                   <span
@@ -228,8 +258,6 @@ const ProjectsMarketplace = ({ user }) => {
                   </span>
                 ))}
               </div>
-
-              {/* Project Stats */}
               <div className="flex justify-between items-center text-sm text-[rgb(148,163,184)] mb-4">
                 <div className="flex items-center gap-1">
                   <Clock className="w-4 h-4" />
@@ -240,7 +268,6 @@ const ProjectsMarketplace = ({ user }) => {
                   <span>{project.curator}</span>
                 </div>
               </div>
-
               <button
                 onClick={(e) => {
                   e.stopPropagation();

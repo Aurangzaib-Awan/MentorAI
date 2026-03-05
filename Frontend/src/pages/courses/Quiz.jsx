@@ -12,11 +12,11 @@
  * - Auto-termination on 0 chances
  * - Results calculation
  * - CSRF token support (fixes 401 on submit)
- * - Local scoring fallback when no quizId (course quiz)
+ * - Smart back navigation: returns to projects or courses based on origin
  */
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
   CheckCircle,
   Clock,
@@ -33,7 +33,6 @@ import useProctoring from '../../hooks/useProctoring';
 
 // ============================================================================
 // CSRF TOKEN HELPER
-// Reads csrf_token from browser cookies (set by backend on login)
 // ============================================================================
 const getCsrfToken = () => {
   const match = document.cookie.match(/csrf_token=([^;]+)/);
@@ -43,6 +42,36 @@ const getCsrfToken = () => {
 const Quiz = ({ questions: propQuestions, quizId, userId }) => {
   const { courseId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // ========================================================================
+  // SMART BACK NAVIGATION
+  // Detects whether the user came from a project quiz or course quiz
+  // and navigates back to the correct section on exit / termination / finish
+  // ========================================================================
+  const handleBackToWorkspace = useCallback(() => {
+    stopProctoring();
+
+    // If we came from a project quiz route (/project-quiz/:id)
+    // navigate back to /projects
+    if (location.pathname.startsWith('/project-quiz')) {
+      navigate('/projects');
+      return;
+    }
+
+    // Default: came from course workspace
+    if (courseId) {
+      navigate(`/courses/${courseId}/workspace`);
+      return;
+    }
+
+    // Fallback: go back in history, or home
+    if (window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate('/');
+    }
+  }, [location.pathname, courseId, navigate]);
 
   // ========================================================================
   // QUIZ STATE
@@ -66,17 +95,13 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
   const [gazeViolationStart, setGazeViolationStart] = useState(null);
   const [gazeViolationDuration, setGazeViolationDuration] = useState(0);
 
-  // Refs for violation tracking
   const gazeTimerRef = useRef(null);
-  const processedAlertsRef = useRef(new Set());
 
   // ========================================================================
-  // ALERT HANDLER - Core proctoring logic
+  // ALERT HANDLER
   // ========================================================================
   const handleAlert = useCallback((data) => {
     const alertType = data.alert;
-
-    // SKIP 'none' alerts
     if (alertType === 'none') return;
 
     console.log('🚨 VIOLATION DETECTED:', alertType);
@@ -96,7 +121,6 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
     setShowViolationToast(true);
     setTimeout(() => setShowViolationToast(false), 3000);
 
-    // DEDUCT CHANCE IMMEDIATELY
     setChances(prev => {
       const next = Math.max(0, prev - 1);
       console.log(`💔 Chances: ${prev} → ${next}`);
@@ -110,15 +134,13 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
   }, []);
 
   // ========================================================================
-  // GAZE TIMER CLEANUP
+  // GAZE TIMER
   // ========================================================================
   useEffect(() => {
     if (gazeViolationStart) {
       const elapsed = (Date.now() - gazeViolationStart) / 1000;
-
       if (elapsed >= 3) {
         console.log(`⚠️ Gaze violation reached 3 seconds: ${elapsed.toFixed(1)}s`);
-
         const logEntry = {
           time: new Date().toLocaleTimeString([], {
             hour: '2-digit',
@@ -128,12 +150,10 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
           type: 'gaze_off_screen_3s',
           behavior: `Gaze deviation for ${elapsed.toFixed(1)}s`
         };
-
         setViolationLogs(prev => [logEntry, ...prev].slice(0, 50));
         setCurrentViolation('Gaze away for 3+ seconds!');
         setShowViolationToast(true);
         setTimeout(() => setShowViolationToast(false), 3000);
-
         setChances(prev => {
           const next = Math.max(0, prev - 1);
           if (next === 0) {
@@ -143,7 +163,6 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
           }
           return next;
         });
-
         setGazeViolationStart(null);
         setGazeViolationDuration(0);
         if (gazeTimerRef.current) {
@@ -173,74 +192,38 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
   });
 
   // ========================================================================
-  // QUIZ DATA
+  // QUIZ DATA — only from props, no hardcoded fallback
   // ========================================================================
-  const quizQuestions = propQuestions || [
-    {
-      id: 1,
-      question: "What is the main purpose of React components?",
-      options: [
-        "To handle API calls",
-        "To create reusable UI pieces",
-        "To manage database operations",
-        "To style web pages"
-      ],
-      correctAnswer: 1
-    },
-    {
-      id: 2,
-      question: "Which hook is used for side effects in React?",
-      options: [
-        "useState",
-        "useEffect",
-        "useContext",
-        "useReducer"
-      ],
-      correctAnswer: 1
-    },
-    {
-      id: 3,
-      question: "What is JSX in React?",
-      options: [
-        "A JavaScript testing framework",
-        "A syntax extension for JavaScript",
-        "A state management library",
-        "A build tool for React"
-      ],
-      correctAnswer: 1
-    },
-    {
-      id: 4,
-      question: "What is the Virtual DOM in React?",
-      options: [
-        "A copy of the real DOM kept in memory",
-        "A cloud-based DOM storage",
-        "A testing environment for React",
-        "A CSS framework for React"
-      ],
-      correctAnswer: 0
-    },
-    {
-      id: 5,
-      question: "Which method is used to update state in React?",
-      options: [
-        "updateState()",
-        "setState()",
-        "changeState()",
-        "modifyState()"
-      ],
-      correctAnswer: 1
-    }
-  ];
+  const quizQuestions = propQuestions || [];
+
+  // Guard: if no questions were passed in, show a clear error state
+  if (!propQuestions || propQuestions.length === 0) {
+    return (
+      <div className="min-h-screen bg-[rgb(248,250,252)] flex items-center justify-center p-6">
+        <div className="max-w-md w-full bg-white border border-[rgb(226,232,240)] rounded-2xl p-8 text-center">
+          <div className="w-16 h-16 bg-yellow-50 rounded-full flex items-center justify-center mx-auto mb-4">
+            <AlertCircle className="w-8 h-8 text-yellow-500" />
+          </div>
+          <h2 className="text-xl font-bold text-[rgb(15,23,42)] mb-2">No Questions Found</h2>
+          <p className="text-[rgb(71,85,105)] text-sm mb-6">
+            Quiz questions could not be loaded. Please go back and try again.
+          </p>
+          <button
+            onClick={handleBackToWorkspace}
+            className="w-full bg-[rgb(37,99,235)] hover:bg-[rgb(29,78,216)] text-white font-semibold py-3 px-6 rounded-xl transition-all"
+          >
+            Go Back
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // ========================================================================
   // QUIZ NAVIGATION
   // ========================================================================
   const handleAnswerSelect = (questionIndex, answerIndex) => {
-    setAnswers(prev => ({
-      ...prev,
-      [questionIndex]: answerIndex
-    }));
+    setAnswers(prev => ({ ...prev, [questionIndex]: answerIndex }));
   };
 
   const handleNext = () => {
@@ -256,14 +239,12 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
   };
 
   // ========================================================================
-  // SCORING
+  // SCORING (local fallback for course quizzes without a quizId)
   // ========================================================================
   const calculateScore = () => {
     let correct = 0;
     quizQuestions.forEach((question, index) => {
-      if (answers[index] === question.correctAnswer) {
-        correct++;
-      }
+      if (answers[index] === question.correctAnswer) correct++;
     });
     return {
       correct,
@@ -274,27 +255,21 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
 
   // ========================================================================
   // QUIZ SUBMIT
-  // - If no quizId: score locally (course quiz with hardcoded questions)
-  // - If quizId exists: submit to backend (project quiz from Gemini)
   // ========================================================================
   const handleSubmitQuiz = async () => {
     setIsSubmitting(true);
     stopProctoring();
 
-    // Build user_answers array
     const user_answers = quizQuestions.map((q, idx) => {
       const answerIndex = answers[idx];
       let selected_letter = null;
       if (typeof answerIndex === 'number') {
-        selected_letter = String.fromCharCode(65 + answerIndex); // 0->A, 1->B, etc.
+        selected_letter = String.fromCharCode(65 + answerIndex); // 0→A, 1→B …
       }
-      return {
-        question_id: q.id,
-        selected_answer: selected_letter
-      };
+      return { question_id: q.id, selected_answer: selected_letter };
     });
 
-    // ✅ NO quizId = course quiz → score locally, no backend call needed
+    // No quizId = course quiz → score locally
     if (!quizId) {
       console.log('ℹ️ No quizId — using local scoring for course quiz');
       const calc = calculateScore();
@@ -304,7 +279,7 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
         results: quizQuestions.map((q, idx) => ({
           question_id: q.id,
           is_correct: answers[idx] === q.correctAnswer,
-          explanation: q.explanation || ""
+          explanation: q.explanation || ''
         }))
       });
       setShowResults(true);
@@ -312,41 +287,35 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
       return;
     }
 
-    // ✅ Has quizId = project quiz → submit to backend
+    // Has quizId = project quiz → submit to backend
     try {
       const csrfToken = getCsrfToken();
+      if (!csrfToken) console.warn('⚠️ CSRF token not found — request may be rejected');
 
-      if (!csrfToken) {
-        console.warn('⚠️ CSRF token not found in cookies - request may be rejected');
-      }
-
-      const res = await fetch("http://localhost:8000/api/quiz/submit", {
-        method: "POST",
+      const res = await fetch('http://localhost:8000/api/quiz/submit', {
+        method: 'POST',
         headers: {
-          "Content-Type": "application/json",
-          ...(csrfToken && { "x-csrf-token": csrfToken }),
+          'Content-Type': 'application/json',
+          ...(csrfToken && { 'x-csrf-token': csrfToken }),
         },
-        credentials: "include",
+        credentials: 'include',
         body: JSON.stringify({ quiz_id: quizId, user_id: userId, user_answers }),
       });
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         console.error('❌ Submit failed:', res.status, errorData);
-
         if (res.status === 401) {
-          alert("Session expired. Please log in again.");
+          alert('Session expired. Please log in again.');
           navigate('/login');
           return;
         }
-
         throw new Error(errorData.detail || `Server error: ${res.status}`);
       }
 
       const data = await res.json();
       setSubmissionResult(data);
       setShowResults(true);
-
     } catch (err) {
       console.error('❌ Quiz submission error:', err);
       alert(`Quiz submission failed: ${err.message}`);
@@ -365,20 +334,13 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
     setQuizStarted(true);
   };
 
-  const handleBackToWorkspace = () => {
-    stopProctoring();
-    navigate(`/courses/${courseId}/workspace`);
-  };
-
   // ========================================================================
   // CLEANUP
   // ========================================================================
   useEffect(() => {
     return () => {
       stopProctoring();
-      if (gazeTimerRef.current) {
-        clearInterval(gazeTimerRef.current);
-      }
+      if (gazeTimerRef.current) clearInterval(gazeTimerRef.current);
     };
   }, [stopProctoring]);
 
@@ -432,7 +394,7 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
             onClick={handleBackToWorkspace}
             className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-3 px-6 rounded-xl transition-all"
           >
-            Return to Workspace
+            {location.pathname.startsWith('/project-quiz') ? 'Return to Projects' : 'Return to Workspace'}
           </button>
         </div>
       </div>
@@ -457,10 +419,11 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
       resultsList = quizQuestions.map((q, idx) => ({
         question_id: q.id,
         is_correct: answers[idx] === q.correctAnswer,
-        explanation: q.explanation || ""
+        explanation: q.explanation || ''
       }));
     }
     const passed = percentage >= 70;
+    const isProjectQuiz = location.pathname.startsWith('/project-quiz');
 
     return (
       <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)] p-6">
@@ -472,11 +435,10 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
 
           <div className="bg-white border border-[rgb(226,232,240)] rounded-2xl p-8 text-center">
             <div className={`w-24 h-24 rounded-full ${passed ? 'bg-green-500/10' : 'bg-red-500/10'} flex items-center justify-center mx-auto mb-6 border ${passed ? 'border-green-500/30' : 'border-red-500/30'}`}>
-              {passed ? (
-                <CheckCircle className="w-12 h-12 text-green-500" />
-              ) : (
-                <X className="w-12 h-12 text-red-500" />
-              )}
+              {passed
+                ? <CheckCircle className="w-12 h-12 text-green-500" />
+                : <X className="w-12 h-12 text-red-500" />
+              }
             </div>
 
             <h2 className="text-2xl font-bold mb-2">
@@ -527,11 +489,10 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
                           Q{idx + 1}: {question?.question}
                         </div>
                         <div>
-                          {r.is_correct ? (
-                            <span className="text-green-600">Correct</span>
-                          ) : (
-                            <span className="text-red-600">Incorrect</span>
-                          )}
+                          {r.is_correct
+                            ? <span className="text-green-600">Correct</span>
+                            : <span className="text-red-600">Incorrect</span>
+                          }
                         </div>
                         {r.explanation && (
                           <div className="mt-1 text-sm text-gray-700">
@@ -549,7 +510,7 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
               onClick={handleBackToWorkspace}
               className="bg-[rgb(37,99,235)] text-white font-bold py-3 px-8 rounded-xl hover:bg-[rgb(29,78,216)] transition-all"
             >
-              Back to Workspace
+              {isProjectQuiz ? 'Back to Projects' : 'Back to Workspace'}
             </button>
           </div>
         </div>
@@ -686,7 +647,6 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
               visualization={visualization}
             />
 
-            {/* Warning indicator */}
             {chances < 3 && (
               <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl animate-pulse">
                 <div className="flex items-center gap-2 text-red-500 mb-1">
@@ -699,7 +659,6 @@ const Quiz = ({ questions: propQuestions, quizId, userId }) => {
               </div>
             )}
 
-            {/* Gaze timer indicator */}
             {gazeViolationDuration > 0 && (
               <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl">
                 <div className="flex items-center justify-between text-yellow-500 mb-1">
