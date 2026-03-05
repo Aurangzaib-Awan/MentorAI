@@ -40,11 +40,16 @@ except ImportError:
 
 router = APIRouter()
 db = client["immersia"]
-project_collection      = db["projects"]        # curated projects (Project schema)
-user_projects_collection = db["user_projects"]  # AI-generated per-user projects
-project_quizzes_collection = db["project_quizzes"]
+project_collection          = db["projects"]
+user_projects_collection    = db["user_projects"]
+project_quizzes_collection  = db["project_quizzes"]
+submissions_collection      = db["project_submissions"]  # NEW
+certificates_collection     = db["certificates"]          # NEW
 
 
+# ============================================================================
+# MODELS
+# ============================================================================
 class QuizSubmission(BaseModel):
     quiz_id: str
     user_id: str
@@ -59,6 +64,88 @@ class GenerateProjectRequest(BaseModel):
     skills: List[str]
     difficulty: Optional[str] = None
 
+class ProjectSubmissionRequest(BaseModel):
+    user_id: str
+    project_id: str
+    description: str
+    github_url: str
+    live_demo_url: str
+    challenges: str
+    learnings: str
+
+class MentorActionRequest(BaseModel):
+    mentor_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+# ============================================================================
+# CERTIFICATE HELPER
+# Called after quiz submit AND after mentor approve.
+# Issues certificate only when BOTH conditions are met.
+# ============================================================================
+def maybe_issue_certificate(user_id: str, project_id: str):
+    try:
+        # 1. Check mentor approval
+        submission = submissions_collection.find_one({
+            "user_id": user_id, "project_id": project_id, "status": "approved"
+        })
+        if not submission:
+            return None
+
+        # 2. Check quiz passed >= 70%
+        quiz = project_quizzes_collection.find_one({
+            "user_id": user_id, "project_id": project_id, "is_completed": True
+        })
+        if not quiz:
+            return None
+
+        total      = len(quiz.get("questions", []))
+        score      = quiz.get("score", 0)
+        percentage = round((score / total) * 100) if total > 0 else 0
+        if percentage < 70:
+            return None
+
+        # 3. Already issued?
+        existing = certificates_collection.find_one({"user_id": user_id, "project_id": project_id})
+        if existing:
+            return serialize_doc(existing)
+
+        # 4. Resolve project metadata
+        project = None
+        try:
+            project = user_projects_collection.find_one({"_id": ObjectId(project_id)})
+        except Exception:
+            pass
+        if not project:
+            try:
+                project = project_collection.find_one({"_id": ObjectId(project_id)})
+            except Exception:
+                pass
+
+        project_title = (project.get("title") or project.get("project_title", "Project")) if project else "Project"
+        technologies  = project.get("technologies", []) if project else []
+        category      = project.get("category", "") if project else ""
+
+        # 5. Issue certificate
+        cert_doc = {
+            "user_id":        user_id,
+            "project_id":     project_id,
+            "project_title":  project_title,
+            "category":       category,
+            "technologies":   technologies,
+            "quiz_score":     percentage,
+            "issued_at":      datetime.now(timezone.utc),
+            "certificate_id": f"IMMERSIA-{user_id[-6:].upper()}-{project_id[-6:].upper()}",
+        }
+        result = certificates_collection.insert_one(cert_doc)
+        cert_doc["_id"] = result.inserted_id
+        logger.info(f"✅ Certificate issued: {cert_doc['certificate_id']}")
+        return serialize_doc(cert_doc)
+
+    except Exception as e:
+        logger.error(f"Certificate issuance error: {e}")
+        return None
+
 
 # ============================================================================
 # GEMINI HELPER
@@ -66,8 +153,8 @@ class GenerateProjectRequest(BaseModel):
 def call_gemini_json(prompt_text: str) -> Optional[str]:
     try:
         model = GeminiClient.GenerativeModel('gemini-2.0-flash')
-        resp = model.generate_content(prompt_text)
-        text = resp.text if hasattr(resp, 'text') else str(resp)
+        resp  = model.generate_content(prompt_text)
+        text  = resp.text if hasattr(resp, 'text') else str(resp)
         if not text:
             return None
         text = text.strip()
@@ -84,72 +171,37 @@ def call_gemini_json(prompt_text: str) -> Optional[str]:
 # ============================================================================
 # PROJECT GENERATION
 # ============================================================================
-
-# Real-world app domains used to seed Gemini's imagination.
-# We pick one randomly so every generation feels fresh.
 APP_DOMAINS = [
-    "a SaaS productivity tool",
-    "a marketplace platform",
-    "a social networking app",
-    "a real-time collaboration tool",
-    "a dashboard and analytics platform",
-    "a booking and scheduling system",
-    "an e-commerce storefront",
-    "a task and project management app",
-    "a food delivery or restaurant ordering system",
-    "a job board and recruitment platform",
-    "a learning management system (LMS)",
-    "a personal finance tracker",
-    "a health and fitness tracking app",
-    "a real estate listing platform",
-    "a news aggregator and reader",
-    "a customer support ticketing system",
-    "an inventory management system",
-    "a ride-sharing or logistics tracker",
-    "a subscription billing platform",
-    "a social media content scheduler",
-    "a URL shortener with analytics",
-    "an event management and ticketing platform",
-    "a blogging and content publishing platform",
-    "a chatbot-powered customer service tool",
-    "a code snippet sharing platform",
-    "a weather dashboard with alerts",
-    "a quiz and assessment platform",
-    "a hotel or accommodation booking app",
-    "a gym membership management system",
+    "a SaaS productivity tool", "a marketplace platform", "a social networking app",
+    "a real-time collaboration tool", "a dashboard and analytics platform",
+    "a booking and scheduling system", "an e-commerce storefront",
+    "a task and project management app", "a food delivery or restaurant ordering system",
+    "a job board and recruitment platform", "a learning management system (LMS)",
+    "a personal finance tracker", "a health and fitness tracking app",
+    "a real estate listing platform", "a news aggregator and reader",
+    "a customer support ticketing system", "an inventory management system",
+    "a ride-sharing or logistics tracker", "a subscription billing platform",
+    "a social media content scheduler", "a URL shortener with analytics",
+    "an event management and ticketing platform", "a blogging and content publishing platform",
+    "a chatbot-powered customer service tool", "a code snippet sharing platform",
+    "a weather dashboard with alerts", "a quiz and assessment platform",
+    "a hotel or accommodation booking app", "a gym membership management system",
     "a document collaboration and version control tool",
 ]
 
 
 @router.post("/api/generate-project")
 async def generate_project(request: GenerateProjectRequest):
-    """
-    Generate a real-world project idea using Gemini.
-    Stores in BOTH:
-      - user_projects  (tracks per-user progress, quiz linking)
-      - projects       (curated marketplace — Project schema)
-    """
     global GeminiClient
     if GeminiClient is None:
         raise HTTPException(status_code=500, detail="google-generativeai not configured")
     if not os.getenv("GEMINI_API_KEY"):
         raise HTTPException(status_code=500, detail="Gemini API key not configured")
 
-    difficulty  = request.difficulty or "Intermediate"
-    skills_str  = ", ".join(request.skills)
+    difficulty = request.difficulty or "Intermediate"
+    skills_str = ", ".join(request.skills)
+    domain     = random.choice(APP_DOMAINS)
 
-    # Pick a random real-world domain to anchor the project idea
-    domain = random.choice(APP_DOMAINS)
-
-    # =========================================================================
-    # MASTER PROMPT — TWO-PHASE THINKING
-    #
-    # Phase 1 (hidden from user): Gemini invents a SPECIFIC real-world app idea
-    #          anchored to the domain, not just "use technology X".
-    # Phase 2: Gemini fills in all the structured fields for that app idea.
-    #
-    # This prevents Gemini from outputting "make a Python app" style projects.
-    # =========================================================================
     master_prompt = f"""You are a senior software engineer and technical mentor at a top bootcamp.
 
 A student wants a hands-on portfolio project. Their skills: {skills_str}. Difficulty: {difficulty}.
@@ -180,61 +232,50 @@ RETURN ONLY valid JSON. No markdown fences. No explanation. Start with {{ end wi
 
 {{
   "title": "AppName — One-line description of what it does (e.g. ShiftMate — Employee Shift Scheduler)",
-
   "description": "2-3 sentences explaining the real-world problem this app solves, who uses it, and what makes it valuable. Write as if pitching to a user, not describing a coding exercise.",
-
   "category": "Exactly one of: Web Development | Mobile Development | Data Science | Machine Learning | Cloud Computing | DevOps | Cyber Security | Artificial Intelligence | Blockchain | Game Development",
-
   "difficulty": "{difficulty}",
-
   "duration": "Exactly one of: 1 week | 2 weeks | 3 weeks | 1 month | 2 months | 3 months | 6 months",
-
   "technologies": ["List actual library/framework names used to build THIS app", "Must include: {skills_str}", "Add supporting tools naturally needed (e.g. JWT, bcrypt, Axios, etc)", "4 to 8 items"],
-
   "prerequisites": [
     "Specific skill the student needs before starting",
     "Another prerequisite directly relevant to {skills_str}",
     "Third prerequisite — minimum 3, maximum 5"
   ],
-
-  "project_description": "## What You're Building\\nDescribe the specific app in 3-4 sentences. Name real features, real user roles, real workflows.\\n\\n## Core Features\\n- **Feature 1**: What it does and why users need it (be specific)\\n- **Feature 2**: What it does and why users need it\\n- **Feature 3**: What it does and why users need it\\n- **Feature 4**: What it does and why users need it\\n- **Feature 5**: What it does and why users need it\\n\\n## Technical Architecture\\n- **Frontend**: What framework/library and how it's used in this app\\n- **Backend**: What framework and what the API does\\n- **Database**: What DB and what data it stores for this app\\n- **Auth**: How users log in and what roles exist\\n\\n## What You'll Build Step by Step\\n1. Project setup and dependency installation\\n2. Database schema and models for this app's data\\n3. Authentication — how users register and log in\\n4. [Primary feature] — specific to this app\\n5. [Secondary feature] — specific to this app\\n6. Frontend UI and connecting to the API\\n7. Validation, error handling, and edge cases\\n8. Tests for critical functionality\\n9. Deployment and environment configuration\\n10. Documentation and final polish\\n\\n## Who This Is For\\nDescribe the real end-user of this app — not 'students learning to code'.",
-
+  "project_description": "## What You're Building\\nDescribe the specific app in 3-4 sentences.\\n\\n## Core Features\\n- **Feature 1**: What it does\\n- **Feature 2**: What it does\\n- **Feature 3**: What it does\\n- **Feature 4**: What it does\\n- **Feature 5**: What it does\\n\\n## Technical Architecture\\n- **Frontend**: framework and usage\\n- **Backend**: framework and API description\\n- **Database**: DB and data stored\\n- **Auth**: login method and roles\\n\\n## What You'll Build Step by Step\\n1. Project setup\\n2. Database schema\\n3. Authentication\\n4. Primary feature\\n5. Secondary feature\\n6. Frontend UI\\n7. Validation and error handling\\n8. Tests\\n9. Deployment\\n10. Documentation\\n\\n## Who This Is For\\nDescribe the real end-user.",
   "tasks": [
-    "Initialize the project: create repo, set up {skills_str} project structure, install all dependencies including [list specific packages for THIS app]",
-    "Design the database schema: define the [specific collections/tables for THIS app's data] with all required fields and relationships",
-    "Build user authentication: registration, login, password hashing with bcrypt, JWT token issuance and validation, protected route middleware",
-    "Implement [primary feature name]: [specific description of what to build for THIS app — not generic]",
-    "Implement [secondary feature name]: [specific description of what to build for THIS app]",
-    "Implement [third feature name]: [specific description of what to build for THIS app]",
-    "Build the frontend: [describe the specific pages/screens and UI components needed for THIS app]",
-    "Add input validation, API error responses, and handle all edge cases for [specific scenarios in THIS app]",
-    "Write tests: unit tests for [specific functions] and integration tests for [specific API endpoints in THIS app]",
-    "Deploy to [appropriate cloud platform] with environment variables, configure CI/CD, and write README with setup guide and screenshots"
+    "Initialize the project: create repo, set up {skills_str} project structure, install all dependencies",
+    "Design the database schema: define collections/tables with all required fields and relationships",
+    "Build user authentication: registration, login, password hashing with bcrypt, JWT token issuance and validation",
+    "Implement [primary feature name]: specific description",
+    "Implement [secondary feature name]: specific description",
+    "Implement [third feature name]: specific description",
+    "Build the frontend: describe specific pages/screens and UI components",
+    "Add input validation, API error responses, and handle edge cases",
+    "Write tests: unit tests and integration tests for critical endpoints",
+    "Deploy to cloud platform with environment variables, CI/CD, and README"
   ],
-
-  "learning_outcomes": "After completing this project you will:\\n- Know how to build [specific thing] using {skills_str}\\n- Understand [specific architectural pattern used in this app]\\n- Be able to implement [specific technical challenge in this app]\\n- Have a deployed, working app to show in your portfolio\\n- Understand how to test and document a production-ready application"
+  "learning_outcomes": "After completing this project you will:\\n- Know how to build [specific thing] using {skills_str}\\n- Understand [architectural pattern]\\n- Be able to implement [technical challenge]\\n- Have a deployed, working app to show in your portfolio\\n- Understand how to test and document a production-ready application"
 }}
 
 ABSOLUTE RULES:
-1. The title must name a SPECIFIC app — include the app name AND what it does
-2. The description must describe a real user problem — not a coding exercise
-3. Tasks 4, 5, 6, 7 must reference THIS app's specific features by name — not generic steps
-4. project_description features must name real UI elements, real data, real user actions
-5. technologies must be a JSON array — real package names, not categories
-6. prerequisites must be a JSON array of strings
-7. tasks must be a JSON array of exactly 10 strings
-8. category and duration must match the exact allowed values listed above
-9. NEVER write "a web application using X" — always name the specific app and its purpose"""
+1. The title must name a SPECIFIC app
+2. The description must describe a real user problem
+3. Tasks 4, 5, 6, 7 must reference THIS app's specific features by name
+4. technologies must be a JSON array of real package names
+5. prerequisites must be a JSON array of strings
+6. tasks must be a JSON array of exactly 10 strings
+7. category and duration must match the exact allowed values listed above
+8. NEVER write "a web application using X" — always name the specific app and its purpose"""
 
     generated = call_gemini_json(master_prompt)
-    parsed = None
+    parsed    = None
 
     for attempt in range(3):
         if generated is None:
             break
         try:
             parsed = json.loads(generated)
-            # Must have a real title (not generic) and tasks
             if parsed.get("title") and parsed.get("tasks") and parsed.get("description"):
                 break
             raise ValueError("Missing required fields")
@@ -246,13 +287,12 @@ ABSOLUTE RULES:
                     "Start with { end with }\n\n" + master_prompt
                 )
 
-    # Structured fallback — still uses the random domain for specificity
     if parsed is None:
         logger.warning("All Gemini attempts failed — using structured fallback")
         skill0 = request.skills[0] if request.skills else "Python"
         parsed = {
-            "title": f"TaskFlow — Team Task & Project Management Tool",
-            "description": f"TaskFlow helps small teams organize work by creating projects, assigning tasks, tracking deadlines, and visualizing progress on a Kanban board. Built using {skills_str}, it demonstrates real-world full-stack development with team collaboration features.",
+            "title": "TaskFlow — Team Task & Project Management Tool",
+            "description": f"TaskFlow helps small teams organize work by creating projects, assigning tasks, tracking deadlines, and visualizing progress on a Kanban board. Built using {skills_str}.",
             "category": "Web Development",
             "difficulty": difficulty,
             "duration": "1 month",
@@ -263,51 +303,35 @@ ABSOLUTE RULES:
                 "Basic experience with Git and version control"
             ],
             "project_description": (
-                "## What You're Building\n"
-                "TaskFlow is a team task management web app where users create workspaces, "
-                "invite teammates, create tasks with deadlines and priorities, assign them to members, "
-                "and track progress through a Kanban board with columns (To Do, In Progress, Done).\n\n"
-                "## Core Features\n"
-                "- **Workspace Management**: Users create named workspaces and invite members by email\n"
-                "- **Task CRUD**: Create, assign, prioritize, and set due dates on tasks\n"
-                "- **Kanban Board**: Drag-and-drop tasks between status columns\n"
-                "- **Activity Feed**: Real-time log of who did what on each task\n"
-                "- **Dashboard**: Summary view of overdue, upcoming, and completed tasks\n\n"
-                "## Technical Architecture\n"
-                f"- **Frontend**: {request.skills[0] if request.skills else 'React'} with component-based UI\n"
-                "- **Backend**: REST API handling workspaces, tasks, users, and invitations\n"
-                "- **Database**: Stores users, workspaces, tasks, assignments, and activity logs\n"
-                "- **Auth**: JWT-based authentication with role-based access (admin vs member)\n\n"
-                "## What You'll Build Step by Step\n"
-                "1. Project setup and dependencies\n2. Database schema design\n"
-                "3. Auth system\n4. Workspace and member management\n"
-                "5. Task CRUD and assignment\n6. Kanban board UI\n"
-                "7. Activity feed\n8. Dashboard analytics\n9. Tests\n10. Deployment\n\n"
-                "## Who This Is For\nSmall teams (2–10 people) who need a lightweight alternative to Jira or Trello."
+                "## What You're Building\nTaskFlow is a team task management web app.\n\n"
+                "## Core Features\n- **Workspace Management**: Create workspaces and invite members\n"
+                "- **Task CRUD**: Create, assign, prioritize tasks\n- **Kanban Board**: Drag-and-drop columns\n"
+                "- **Activity Feed**: Real-time log\n- **Dashboard**: Summary view\n\n"
+                "## Technical Architecture\n- **Frontend**: React\n- **Backend**: REST API\n"
+                "- **Database**: MongoDB\n- **Auth**: JWT\n\n"
+                "## Who This Is For\nSmall teams needing a lightweight Jira/Trello alternative."
             ),
             "tasks": [
-                f"Initialize project: create repo, set up {skills_str} project structure, install dependencies (JWT, bcrypt, database driver, HTTP client)",
-                "Design database schema: users, workspaces, workspace_members, tasks, task_assignments, and activity_log collections/tables",
-                "Build auth system: registration, login, bcrypt password hashing, JWT token generation, token refresh, and auth middleware",
-                "Implement workspace management: create workspace, invite members by email, accept invitations, list workspaces for current user",
-                "Implement task CRUD: create task with title, description, priority, due date; assign to member; update status; delete task",
-                "Build Kanban board UI: three-column layout (To Do, In Progress, Done), drag-and-drop task cards, real-time status update on drop",
-                "Build dashboard and activity feed: overdue task count, tasks due today, completed this week, and chronological activity log per workspace",
-                "Add validation: required fields, date format checks, membership authorization (only workspace members can view/edit tasks)",
-                "Write tests: unit tests for auth helper functions and integration tests for task CRUD and workspace invite endpoints",
-                "Deploy to Railway or Render, configure environment variables, set up GitHub Actions CI, write README with screenshots and setup guide"
+                f"Initialize project: create repo, set up {skills_str} structure, install dependencies",
+                "Design database schema: users, workspaces, tasks, assignments, activity_log",
+                "Build auth system: registration, login, bcrypt, JWT, middleware",
+                "Implement workspace management: create, invite members, list workspaces",
+                "Implement task CRUD: create, assign, prioritize, due dates, update status",
+                "Build Kanban board UI: three-column layout, drag-and-drop cards",
+                "Build dashboard and activity feed: overdue, upcoming, completed counts",
+                "Add validation: required fields, date checks, membership authorization",
+                "Write tests: unit tests for auth helpers, integration tests for task endpoints",
+                "Deploy to Railway or Render, configure environment variables, write README"
             ],
             "learning_outcomes": (
-                "After completing this project you will:\n"
-                f"- Know how to build a multi-user SaaS tool using {skills_str}\n"
+                f"After completing this project you will:\n- Know how to build a multi-user SaaS tool using {skills_str}\n"
                 "- Understand role-based access control and JWT authentication\n"
-                "- Be able to implement drag-and-drop Kanban boards with status persistence\n"
-                "- Have a deployed, working app to show in your portfolio\n"
+                "- Be able to implement drag-and-drop Kanban boards\n"
+                "- Have a deployed, working app for your portfolio\n"
                 "- Understand how to test and document a production-ready application"
             )
         }
 
-    # ── Normalize fields against allowed values ───────────────────────────────
     ALLOWED_CATEGORIES = [
         'Web Development', 'Mobile Development', 'Data Science', 'Machine Learning',
         'Cloud Computing', 'DevOps', 'Cyber Security', 'Artificial Intelligence',
@@ -346,41 +370,38 @@ ABSOLUTE RULES:
         tasks = []
     tasks = [str(t) for t in tasks if str(t).strip()]
 
-    title            = parsed.get("title", "")
-    description      = parsed.get("description", "")
-    project_desc     = parsed.get("project_description", "")
+    title             = parsed.get("title", "")
+    description       = parsed.get("description", "")
+    project_desc      = parsed.get("project_description", "")
     learning_outcomes = parsed.get("learning_outcomes", "")
-    now              = datetime.now(timezone.utc)
+    now               = datetime.now(timezone.utc)
 
-    # ── 1. Save to user_projects (progress tracking, quiz linking) ────────────
     user_doc = {
-        "user_id":            request.user_id,
-        "skills":             request.skills,
-        "title":              title,
-        "description":        description,
-        "category":           category,
-        "difficulty":         parsed.get("difficulty", difficulty),
-        "duration":           duration,
-        "technologies":       technologies,
-        "prerequisites":      prerequisites,
-        "project_title":      title,
+        "user_id":             request.user_id,
+        "skills":              request.skills,
+        "title":               title,
+        "description":         description,
+        "category":            category,
+        "difficulty":          parsed.get("difficulty", difficulty),
+        "duration":            duration,
+        "technologies":        technologies,
+        "prerequisites":       prerequisites,
+        "project_title":       title,
         "project_description": project_desc,
-        "tasks":              tasks,
-        "learning_outcomes":  learning_outcomes,
-        "status":             "pending",
-        "created_at":         now,
+        "tasks":               tasks,
+        "learning_outcomes":   learning_outcomes,
+        "status":              "pending",
+        "created_at":          now,
     }
 
     try:
-        user_result = user_projects_collection.insert_one(user_doc)
+        user_result            = user_projects_collection.insert_one(user_doc)
         user_doc["_id"]        = user_result.inserted_id
         user_doc["project_id"] = str(user_result.inserted_id)
     except Exception as e:
         logger.error(f"user_projects insert error: {e}")
         raise HTTPException(status_code=500, detail="Error saving project")
 
-    # ── 2. Save to projects (curated marketplace — Project schema) ────────────
-    #   curator = "AI Generated" (fixed value as per requirements)
     curated_doc = {
         "title":               title,
         "description":         description,
@@ -393,12 +414,9 @@ ABSOLUTE RULES:
         "project_description": project_desc,
         "created_at":          now,
         "updated_at":          now,
-        # extra fields for quiz generation context (not in schema but harmless in Mongo)
         "tasks":               tasks,
         "learning_outcomes":   learning_outcomes,
         "generated_by_user":   request.user_id,
-        # ── FIX: store the user_projects _id so the frontend can always
-        #    resolve back to the user_projects document when generating a quiz
         "user_project_id":     str(user_result.inserted_id),
     }
 
@@ -406,7 +424,6 @@ ABSOLUTE RULES:
         project_collection.insert_one(curated_doc)
         logger.info(f"Project '{title}' also saved to curated projects collection")
     except Exception as e:
-        # Non-fatal — user_projects already saved, quiz generation will still work
         logger.warning(f"projects collection insert failed (non-fatal): {e}")
 
     return serialize_doc(user_doc)
@@ -423,30 +440,22 @@ async def generate_quiz(request: GenerateQuizRequest):
     if not os.getenv("GEMINI_API_KEY"):
         raise HTTPException(status_code=500, detail="Gemini API key not configured")
 
-    # ── FIX: look up in user_projects first, then fall back to curated projects
     proj = None
     try:
         obj_id = ObjectId(request.project_id)
-        proj = user_projects_collection.find_one({"_id": obj_id})
+        proj   = user_projects_collection.find_one({"_id": obj_id})
         if not proj:
-            # Frontend may have passed the curated projects _id (e.g. navigated
-            # directly from the marketplace).  Check that collection too.
             curated = project_collection.find_one({"_id": obj_id})
             if curated:
-                # If this curated doc was AI-generated it carries user_project_id;
-                # prefer the richer user_projects document when available.
                 user_proj_id = curated.get("user_project_id")
                 if user_proj_id:
                     try:
-                        proj = user_projects_collection.find_one(
-                            {"_id": ObjectId(user_proj_id)}
-                        )
+                        proj = user_projects_collection.find_one({"_id": ObjectId(user_proj_id)})
                     except Exception:
                         pass
-                # Still nothing?  Use the curated doc itself — it has all fields.
                 if not proj:
                     proj = curated
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid project_id")
 
     if not proj:
@@ -465,12 +474,9 @@ async def generate_quiz(request: GenerateQuizRequest):
     tech_str      = ', '.join(technologies) if isinstance(technologies, list) else str(technologies)
 
     ctx = [
-        f"Project Title: {title}",
-        f"Category: {category}",
-        f"Difficulty: {difficulty}",
-        f"Duration: {duration}",
-        f"Technologies: {tech_str}",
-        f"Short Description: {description}",
+        f"Project Title: {title}", f"Category: {category}",
+        f"Difficulty: {difficulty}", f"Duration: {duration}",
+        f"Technologies: {tech_str}", f"Short Description: {description}",
     ]
     if proj_desc:
         ctx.append(f"Full Project Description:\n{proj_desc[:1200]}")
@@ -492,20 +498,20 @@ PROJECT BEING ASSESSED:
 
 Write exactly 10 multiple-choice questions that test whether a student actually built and understood this specific project.
 
-COVERAGE — spread questions across:
-- Q1–Q2: Project setup, architecture decisions, and configuration specific to {title}
-- Q3–Q4: How the core features of {title} are implemented using {tech_str}
-- Q5–Q6: Specific {tech_str} APIs, patterns, and methods used in this project
-- Q7–Q8: Error handling, validation, security, and edge cases in {title}
+COVERAGE:
+- Q1-Q2: Project setup, architecture decisions, and configuration specific to {title}
+- Q3-Q4: How the core features of {title} are implemented using {tech_str}
+- Q5-Q6: Specific {tech_str} APIs, patterns, and methods used in this project
+- Q7-Q8: Error handling, validation, security, and edge cases in {title}
 - Q9: Testing and deployment decisions made for {title}
-- Q10: A debugging or decision-making scenario — "given this situation in {title}, what do you do?"
+- Q10: A debugging or decision-making scenario in {title}
 
 RULES:
-- Every question must name or reference "{title}" or its specific features — not generic trivia
-- Wrong options must be plausible — not obviously silly
+- Every question must reference "{title}" or its specific features
+- Wrong options must be plausible
 - correct_answer is exactly one of: "A", "B", "C", "D"
 - Each option starts with its letter: "A) ...", "B) ...", "C) ...", "D) ..."
-- explanation must say WHY the correct answer is right AND why others are wrong
+- explanation must say WHY correct is right AND why others are wrong
 
 RETURN ONLY valid JSON. No markdown. No backticks. Start {{ end }}
 
@@ -513,10 +519,10 @@ RETURN ONLY valid JSON. No markdown. No backticks. Start {{ end }}
   "questions": [
     {{
       "id": 1,
-      "question": "Question referencing {title} specifically?",
-      "options": ["A) Plausible option", "B) Plausible option", "C) Plausible option", "D) Plausible option"],
+      "question": "Question referencing {title}?",
+      "options": ["A) option", "B) option", "C) option", "D) option"],
       "correct_answer": "A",
-      "explanation": "A is correct because [reason specific to {title}]. B is wrong because [reason]. C is wrong because [reason]. D is wrong because [reason]."
+      "explanation": "A is correct because... B is wrong because... C is wrong because... D is wrong because..."
     }}
   ]
 }}
@@ -524,7 +530,7 @@ RETURN ONLY valid JSON. No markdown. No backticks. Start {{ end }}
 Generate ALL 10 questions now."""
 
     generated = call_gemini_json(quiz_prompt)
-    parsed = None
+    parsed    = None
 
     for attempt in range(3):
         if generated is None:
@@ -543,24 +549,22 @@ Generate ALL 10 questions now."""
                 )
 
     if parsed is None or "questions" not in parsed:
-        logger.warning("Quiz generation failed — using project-aware fallback")
         tech_list = technologies if isinstance(technologies, list) else [str(technologies)]
-        t0 = tech_list[0] if tech_list else "the primary technology"
-        parsed = {"questions": [
-            {"id":1,"question":f"In {title}, what is the primary responsibility of {t0} in the application architecture?","options":["A) Managing application state and rendering the UI","B) Handling file uploads to cloud storage","C) Sending transactional emails to users","D) Running scheduled background jobs"],"correct_answer":"A","explanation":f"In {title}, {t0} is responsible for managing state and rendering. The other options describe separate services not handled by {t0}."},
-            {"id":2,"question":f"Which environment setup step is required before running {title} locally?","options":["A) Run the app directly without any configuration","B) Copy .env.example to .env and fill in database and JWT secret values","C) Hard-code database credentials in the source files","D) Disable authentication for local development"],"correct_answer":"B","explanation":"Environment variables must be configured before the app can connect to the database or sign tokens. Hard-coding credentials is a security risk."},
-            {"id":3,"question":f"In {title}, how are user passwords stored in the database?","options":["A) As plain text for easy comparison","B) Base64 encoded","C) Hashed with bcrypt and a salt","D) Encrypted with AES-256 symmetrically"],"correct_answer":"C","explanation":"bcrypt hashing with a salt is the industry standard. Plain text and base64 are insecure. AES is symmetric encryption, not suitable for passwords."},
-            {"id":4,"question":f"What HTTP status code does the {title} API return when a requested resource is not found?","options":["A) 200 OK","B) 400 Bad Request","C) 404 Not Found","D) 500 Internal Server Error"],"correct_answer":"C","explanation":"404 Not Found is the correct semantic status for a missing resource. 400 is for bad input, 500 is for server errors, 200 means success."},
-            {"id":5,"question":f"How does {title} protect routes so only authenticated users can access them?","options":["A) By checking a hardcoded username in the request","B) By validating a JWT token in the Authorization header via middleware","C) By storing the user's password in a session cookie","D) By requiring users to re-enter credentials on every request"],"correct_answer":"B","explanation":"JWT middleware validates the token on protected routes. Hardcoded checks are insecure, passwords in cookies violate security best practices, and re-entering credentials destroys UX."},
-            {"id":6,"question":f"In {title}, what happens when a user submits a form with missing required fields?","options":["A) The server crashes with an unhandled exception","B) The data is saved with null values silently","C) The API returns a 400 Bad Request with a descriptive error message","D) The request is redirected to the login page"],"correct_answer":"C","explanation":"Proper validation returns 400 with error details so the client can inform the user. Silent nulls cause data integrity issues and crashes are unacceptable in production."},
-            {"id":7,"question":f"What is the correct way to structure the {title} project repository?","options":["A) All files in the root directory with no subfolders","B) Separate folders for routes, models, middleware, and configuration","C) One file per feature with all logic combined","D) Frontend and backend mixed in the same files"],"correct_answer":"B","explanation":"Separation of concerns into routes, models, and middleware directories makes the codebase maintainable and testable."},
-            {"id":8,"question":f"How should the {title} database connection be managed in production?","options":["A) Open a new connection for every incoming request","B) Use a connection pool configured via environment variables","C) Hardcode the connection string in main application file","D) Connect only when the first user logs in"],"correct_answer":"B","explanation":"Connection pooling reuses connections efficiently. Opening a new connection per request is extremely slow. Hardcoded strings are a security risk."},
-            {"id":9,"question":f"When deploying {title} to production, which practice is most important?","options":["A) Disable all logging to improve performance","B) Configure all secrets as environment variables and never commit them to Git","C) Use the same database as the development environment","D) Turn off authentication for easier testing in production"],"correct_answer":"B","explanation":"Secrets must never be committed to source control. Sharing dev/prod databases risks data corruption. Disabling auth or logging in production creates security and debugging problems."},
-            {"id":10,"question":f"A user reports that {title} shows stale data after updating a record. What is the most likely cause and fix?","options":["A) The server is down and needs restarting","B) The frontend is displaying cached state and needs to re-fetch or update local state after the API call","C) The database has been corrupted and needs to be restored","D) The JWT token has expired and the user needs to log in again"],"correct_answer":"B","explanation":"Stale UI data after an update almost always means the frontend state was not refreshed after the successful API call. The fix is to either re-fetch the data or update local state optimistically."},
+        t0        = tech_list[0] if tech_list else "the primary technology"
+        parsed    = {"questions": [
+            {"id":1,"question":f"In {title}, what is the primary responsibility of {t0}?","options":["A) Managing application state and rendering the UI","B) Handling file uploads to cloud storage","C) Sending transactional emails to users","D) Running scheduled background jobs"],"correct_answer":"A","explanation":f"{t0} manages state and rendering. Others are separate services."},
+            {"id":2,"question":f"Which setup step is required before running {title} locally?","options":["A) Run directly without configuration","B) Copy .env.example to .env and fill in values","C) Hard-code credentials in source files","D) Disable authentication"],"correct_answer":"B","explanation":"Environment variables must be configured first."},
+            {"id":3,"question":f"How are passwords stored in {title}?","options":["A) Plain text","B) Base64 encoded","C) Hashed with bcrypt and a salt","D) AES-256 encrypted"],"correct_answer":"C","explanation":"bcrypt with salt is the industry standard."},
+            {"id":4,"question":f"What status code does {title} return for a missing resource?","options":["A) 200 OK","B) 400 Bad Request","C) 404 Not Found","D) 500 Internal Server Error"],"correct_answer":"C","explanation":"404 is the correct semantic status for missing resources."},
+            {"id":5,"question":f"How does {title} protect routes for authenticated users only?","options":["A) Hardcoded username check","B) JWT token validation via middleware","C) Password stored in session cookie","D) Re-enter credentials every request"],"correct_answer":"B","explanation":"JWT middleware validates tokens on protected routes."},
+            {"id":6,"question":f"What happens in {title} when required fields are missing?","options":["A) Server crashes","B) Saved with null values","C) 400 Bad Request with error message","D) Redirected to login"],"correct_answer":"C","explanation":"Proper validation returns 400 with descriptive errors."},
+            {"id":7,"question":f"What is the correct repository structure for {title}?","options":["A) All files in root","B) Separate folders for routes, models, middleware","C) One file per feature","D) Frontend and backend mixed"],"correct_answer":"B","explanation":"Separation of concerns makes the codebase maintainable."},
+            {"id":8,"question":f"How should {title}'s database connection be managed in production?","options":["A) New connection per request","B) Connection pool via environment variables","C) Hardcoded connection string","D) Connect on first user login"],"correct_answer":"B","explanation":"Connection pooling is efficient and secure."},
+            {"id":9,"question":f"Most important practice when deploying {title} to production?","options":["A) Disable logging","B) Secrets as environment variables, never in Git","C) Share dev and prod database","D) Disable authentication"],"correct_answer":"B","explanation":"Secrets must never be committed to source control."},
+            {"id":10,"question":f"User reports stale data in {title} after updating a record. Most likely cause?","options":["A) Server is down","B) Frontend cache not refreshed after API call","C) Database corrupted","D) JWT token expired"],"correct_answer":"B","explanation":"Stale UI almost always means frontend state was not refreshed after a successful API call."},
         ]}
 
     questions = parsed.get("questions", [])
-
     validated = []
     for i, q in enumerate(questions[:10], 1):
         correct = str(q.get("correct_answer", "A")).strip()
@@ -569,32 +573,32 @@ Generate ALL 10 questions now."""
         if correct not in ["A", "B", "C", "D"]:
             correct = "A"
         validated.append({
-            "id":           q.get("id", i),
-            "question":     q.get("question", f"Question {i} about {title}"),
-            "options":      q.get("options", ["A) Option A", "B) Option B", "C) Option C", "D) Option D"]),
+            "id":             q.get("id", i),
+            "question":       q.get("question", f"Question {i} about {title}"),
+            "options":        q.get("options", ["A) Option A", "B) Option B", "C) Option C", "D) Option D"]),
             "correct_answer": correct,
-            "explanation":  q.get("explanation", f"Refer to the {title} project documentation.")
+            "explanation":    q.get("explanation", f"Refer to the {title} documentation.")
         })
 
     while len(validated) < 10:
         i = len(validated) + 1
         validated.append({
             "id": i,
-            "question": f"What is the best practice for handling errors in the {title} API?",
-            "options": ["A) Return descriptive error messages with appropriate HTTP status codes","B) Always return 200 OK regardless of what happened","C) Crash the server so the error is visible","D) Return empty responses on failure"],
+            "question": f"What is best practice for handling errors in the {title} API?",
+            "options": ["A) Descriptive errors with correct HTTP status codes","B) Always return 200 OK","C) Crash the server","D) Return empty responses"],
             "correct_answer": "A",
             "explanation": "Descriptive errors with correct status codes help clients handle failures gracefully."
         })
 
     quiz_doc = {
-        "project_id":  request.project_id,
-        "user_id":     request.user_id,
-        "questions":   validated,
-        "created_at":  datetime.now(timezone.utc),
+        "project_id":   request.project_id,
+        "user_id":      request.user_id,
+        "questions":    validated,
+        "created_at":   datetime.now(timezone.utc),
         "is_completed": False,
     }
     try:
-        result = project_quizzes_collection.insert_one(quiz_doc)
+        result      = project_quizzes_collection.insert_one(quiz_doc)
         quiz_id_str = str(result.inserted_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Error saving quiz")
@@ -604,7 +608,7 @@ Generate ALL 10 questions now."""
 
 
 # ============================================================================
-# STANDARD PROJECT ROUTES (unchanged)
+# STANDARD PROJECT ROUTES (unchanged from original)
 # ============================================================================
 @router.get("/projects")
 async def get_projects():
@@ -613,7 +617,7 @@ async def get_projects():
         for p in projects:
             p["id"] = str(p["_id"]); del p["_id"]
         return {"projects": projects}
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/projects")
@@ -630,7 +634,7 @@ async def create_project(project: Project):
         return {"id": str(result.inserted_id), "message": "Project Created Successfully"}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.put("/projects/{project_id}")
@@ -652,7 +656,7 @@ async def update_project(project_id: str, project: Project):
         return {"message": "Project updated successfully"}
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.delete("/projects/{project_id}")
@@ -662,7 +666,7 @@ async def delete_project(project_id: str):
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Project not found")
         return {"message": "Project deleted successfully"}
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/projects/{project_id}")
@@ -675,7 +679,7 @@ async def get_project(project_id: str):
         return project
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/projects/category/{category}")
@@ -685,38 +689,187 @@ async def get_projects_by_category(category: str):
         for p in projects:
             p["id"] = str(p["_id"]); del p["_id"]
         return {"projects": projects}
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@router.get("/projects/difficulty/{difficulty}")
+async def get_projects_by_difficulty(difficulty: str):
+    try:
+        projects = list(project_collection.find({"difficulty": difficulty}))
+        for p in projects:
+            p["id"] = str(p["_id"]); del p["_id"]
+        return {"projects": projects}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============================================================================
+# QUIZ SUBMIT — now triggers certificate check
+# ============================================================================
 @router.post("/api/quiz/submit")
 async def submit_quiz(sub: QuizSubmission):
     try:
         quiz_doc = project_quizzes_collection.find_one({"_id": ObjectId(sub.quiz_id)})
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid quiz_id")
     if not quiz_doc:
         raise HTTPException(status_code=404, detail="Quiz not found")
 
-    score = 0
+    score   = 0
     results = []
     for q in quiz_doc.get("questions", []):
-        qid     = q.get("id")
-        correct = q.get("correct_answer")
-        ans     = next((u for u in sub.user_answers if u.get("question_id") == qid), None)
+        qid      = q.get("id")
+        correct  = q.get("correct_answer")
+        ans      = next((u for u in sub.user_answers if u.get("question_id") == qid), None)
         selected = ans.get("selected_answer") if ans else None
         is_correct = selected == correct
         if is_correct:
             score += 1
-        results.append({"question_id": qid, "selected": selected, "correct": correct,
-                         "is_correct": is_correct, "explanation": q.get("explanation", "")})
+        results.append({
+            "question_id": qid, "selected": selected,
+            "correct": correct, "is_correct": is_correct,
+            "explanation": q.get("explanation", "")
+        })
 
     project_quizzes_collection.update_one(
         {"_id": ObjectId(sub.quiz_id)},
-        {"$set": {"is_completed": True, "score": score,
-                  "user_answers": sub.user_answers, "submitted_at": datetime.now(timezone.utc)}}
+        {"$set": {
+            "is_completed": True, "score": score,
+            "user_answers": sub.user_answers,
+            "submitted_at": datetime.now(timezone.utc)
+        }}
     )
-    return {"score": score, "total": len(quiz_doc.get("questions", [])), "results": results}
 
+    # Try to issue certificate now that quiz is complete
+    project_id  = quiz_doc.get("project_id", "")
+    certificate = maybe_issue_certificate(sub.user_id, project_id)
+
+    return {
+        "score":       score,
+        "total":       len(quiz_doc.get("questions", [])),
+        "results":     results,
+        "certificate": certificate,  # None if mentor hasn't approved yet
+    }
+
+
+# ============================================================================
+# PROJECT SUBMISSION — user submits for mentor review
+# ============================================================================
+@router.post("/api/projects/submit")
+async def submit_project(request: ProjectSubmissionRequest):
+    existing = submissions_collection.find_one({
+        "user_id":    request.user_id,
+        "project_id": request.project_id,
+        "status":     {"$in": ["pending", "approved"]}
+    })
+    if existing:
+        raise HTTPException(status_code=409, detail="You have already submitted this project. Wait for mentor review.")
+
+    doc = {
+        "user_id":       request.user_id,
+        "project_id":    request.project_id,
+        "description":   request.description,
+        "github_url":    request.github_url,
+        "live_demo_url": request.live_demo_url,
+        "challenges":    request.challenges,
+        "learnings":     request.learnings,
+        "status":        "pending",
+        "submitted_at":  datetime.now(timezone.utc),
+    }
+
+    try:
+        result               = submissions_collection.insert_one(doc)
+        doc["_id"]           = result.inserted_id
+        doc["submission_id"] = str(result.inserted_id)
+    except Exception as e:
+        logger.error(f"Submission insert error: {e}")
+        raise HTTPException(status_code=500, detail="Error saving submission")
+
+    return serialize_doc(doc)
+
+
+# ============================================================================
+# GET ALL SUBMISSIONS — mentor dashboard
+# ============================================================================
+@router.get("/api/submissions")
+async def get_all_submissions():
+    try:
+        docs = list(submissions_collection.find())
+        for d in docs:
+            d["submission_id"] = str(d["_id"])
+            d["_id"]           = str(d["_id"])
+        return {"submissions": docs}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============================================================================
+# MENTOR APPROVE
+# ============================================================================
+@router.post("/api/submissions/{submission_id}/approve")
+async def approve_submission(submission_id: str, body: MentorActionRequest):
+    try:
+        doc = submissions_collection.find_one({"_id": ObjectId(submission_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid submission_id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    submissions_collection.update_one(
+        {"_id": ObjectId(submission_id)},
+        {"$set": {
+            "status":      "approved",
+            "reviewed_at": datetime.now(timezone.utc),
+            "mentor_id":   body.mentor_id,
+            "reason":      body.reason,
+        }}
+    )
+
+    certificate = maybe_issue_certificate(doc.get("user_id", ""), doc.get("project_id", ""))
+    return {"message": "Submission approved", "certificate": certificate}
+
+
+# ============================================================================
+# MENTOR REJECT
+# ============================================================================
+@router.post("/api/submissions/{submission_id}/reject")
+async def reject_submission(submission_id: str, body: MentorActionRequest):
+    try:
+        doc = submissions_collection.find_one({"_id": ObjectId(submission_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid submission_id")
+    if not doc:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    submissions_collection.update_one(
+        {"_id": ObjectId(submission_id)},
+        {"$set": {
+            "status":      "rejected",
+            "reviewed_at": datetime.now(timezone.utc),
+            "mentor_id":   body.mentor_id,
+            "reason":      body.reason,
+        }}
+    )
+    return {"message": "Submission rejected"}
+
+
+# ============================================================================
+# GET USER CERTIFICATES
+# ============================================================================
+@router.get("/api/certificates/{user_id}")
+async def get_user_certificates(user_id: str):
+    try:
+        certs = list(certificates_collection.find({"user_id": user_id}))
+        for c in certs:
+            c["_id"] = str(c["_id"])
+        return {"certificates": certs}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ============================================================================
+# USER PROJECT ROUTES (unchanged from original)
+# ============================================================================
 @router.patch("/api/projects/{project_id}/complete")
 async def complete_user_project(project_id: str):
     try:
@@ -724,7 +877,7 @@ async def complete_user_project(project_id: str):
             {"_id": ObjectId(project_id)},
             {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc)}}
         )
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid project_id")
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -742,15 +895,5 @@ async def get_user_projects(user_id: str):
             p["project_id"] = str(p.get("_id"))
             p["_id"]        = str(p.get("_id"))
         return {"projects": projects}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-@router.get("/projects/difficulty/{difficulty}")
-async def get_projects_by_difficulty(difficulty: str):
-    try:
-        projects = list(project_collection.find({"difficulty": difficulty}))
-        for p in projects:
-            p["id"] = str(p["_id"]); del p["_id"]
-        return {"projects": projects}
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Internal server error")

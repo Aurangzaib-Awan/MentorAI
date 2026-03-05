@@ -31,6 +31,7 @@ CSRF_EXEMPT_PREFIXES = (
     "/api/generate-quiz",     # Gemini quiz generation
     "/api/quiz/submit",       # Quiz submission
     "/api/projects/",         # ✅ FIX 2: covers PATCH /api/projects/{id}/complete
+    "/api/submissions/",
 )
 
 

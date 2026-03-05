@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
+
 import os
 import logging
 import json
@@ -26,6 +27,7 @@ from routes.register import login
 from routes.project import projectRoute 
 from routes.admin import admin
 from routes import proctoring
+from routes.talent import talentRoute
 
 # Configure logging
 logging.basicConfig(
@@ -89,6 +91,7 @@ app.include_router(login.router)
 app.include_router(projectRoute.router)
 app.include_router(admin.router)
 app.include_router(proctoring.router)
+app.include_router(talentRoute.router)
 
 if __name__ == "__main__":
     import uvicorn

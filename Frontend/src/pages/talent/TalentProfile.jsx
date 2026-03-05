@@ -1,73 +1,59 @@
 // pages/TalentProfile.jsx
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link, Navigate } from 'react-router-dom';
-import { ArrowLeft, Mail, Phone, MapPin, Calendar, Award, FileText, Users, Download } from 'lucide-react';
+import { ArrowLeft, Mail, Phone, MapPin, Calendar, Award, Users, CheckCircle } from 'lucide-react';
+
+const API_BASE = "http://localhost:8000";
 
 const TalentProfile = ({ user }) => {
   const { talentId } = useParams();
   const navigate = useNavigate();
   const [talent, setTalent] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  // Move ALL hooks to the top, before any conditional returns
   useEffect(() => {
-    // Only fetch data if user is HR
-    if (user && user.is_hr) {
-      // Mock data - replace with actual API call
-      setTimeout(() => {
-        const mockTalent = {
-          id: talentId,
-          name: "Sarah Johnson",
-          title: "Full Stack Developer",
-          email: "sarah.johnson@email.com",
-          phone: "+1 (555) 123-4567",
-          bio: "Passionate developer with 3+ years of experience in React, Node.js, and cloud technologies. Completed 5 certified courses and 12 real-world projects.",
-          skills: ["React", "Node.js", "MongoDB", "AWS", "TypeScript", "Docker", "Git"],
-          certifications: [
-            { name: "Advanced React Development", type: "course", date: "2024-01-15" },
-            { name: "Cloud Architecture", type: "course", date: "2024-02-20" },
-            { name: "E-commerce Platform", type: "project", date: "2024-03-10" }
-          ],
-          experience: [
-            { role: "Senior Developer", company: "Tech Corp", duration: "2 years" },
-            { role: "Full Stack Developer", company: "Startup Inc", duration: "1 year" }
-          ],
-          education: "BS Computer Science - Stanford University",
-          location: "San Francisco, CA",
-          availability: "Immediately",
-          expectedSalary: "$120,000 - $140,000",
-          resumeUrl: "#", // URL to download resume
-          isVerified: true
-        };
-        setTalent(mockTalent);
-        setLoading(false);
-      }, 1000);
-    } else {
-      // Use setTimeout to make setLoading asynchronous
-      const timer = setTimeout(() => {
-        setLoading(false);
-      }, 0);
-      
-      return () => clearTimeout(timer);
+    // Only fetch if user is HR — avoids leaking data to non-HR
+    if (!user || !user.is_hr) {
+      setLoading(false);
+      return;
     }
-  }, [talentId, user]); // Add user to dependencies
 
-  // Now do conditional returns AFTER all hooks
+    const fetchProfile = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/talent/${talentId}`, {
+          credentials: "include",
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        setTalent(data);
+      } catch (err) {
+        console.error("Failed to fetch talent profile:", err);
+        setError("Could not load this talent profile.");
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchProfile();
+  }, [talentId, user]);
+
+  // ── Guards (after hooks) ─────────────────────────────────────────────────
   if (!user) {
     return <Navigate to="/login" state={{ from: `/talent/${talentId}` }} />;
   }
 
   if (!user.is_hr) {
     return (
-      <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)] flex items-center justify-center">
+      <div className="min-h-screen bg-[rgb(248,250,252)] flex items-center justify-center">
         <div className="text-center max-w-md mx-4">
-          <div className="bg-red-500/20 border border-red-400/30 rounded-xl p-6">
-            <h2 className="text-2xl font-bold text-red-400 mb-4">Access Denied</h2>
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6">
+            <h2 className="text-2xl font-bold text-red-500 mb-3">Access Denied</h2>
             <p className="text-[rgb(71,85,105)] mb-4">
-              Only verified HR professionals can view talent profiles. 
-              Your email ({user.email}) doesn't have HR privileges.
+              Only verified HR professionals can view full talent profiles.
+              Your account ({user.email}) does not have HR privileges.
             </p>
-            <button 
+            <button
               onClick={() => navigate('/talent')}
               className="bg-[rgb(37,99,235)] hover:bg-[rgb(29,78,216)] text-white px-6 py-2 rounded-lg transition-colors"
             >
@@ -81,162 +67,226 @@ const TalentProfile = ({ user }) => {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)] p-6">
-        <div className="max-w-7xl mx-auto">
-          <div className="text-center py-20">
-            <div className="w-16 h-16 border-4 border-sky-400 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="text-[rgb(71,85,105)] text-lg">Loading talent profile...</p>
+      <div className="min-h-screen bg-[rgb(248,250,252)] flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-[rgb(37,99,235)] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-[rgb(148,163,184)]">Loading talent profile...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !talent) {
+    return (
+      <div className="min-h-screen bg-[rgb(248,250,252)] flex items-center justify-center">
+        <div className="text-center max-w-md mx-4">
+          <div className="bg-red-50 border border-red-200 rounded-xl p-6">
+            <p className="text-red-600 font-medium mb-4">{error || "Talent not found."}</p>
+            <button
+              onClick={() => navigate('/talent')}
+              className="bg-[rgb(37,99,235)] hover:bg-[rgb(29,78,216)] text-white px-6 py-2 rounded-lg transition-colors"
+            >
+              Back to Talent Pool
+            </button>
           </div>
         </div>
       </div>
     );
   }
 
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  const formatDate = (iso) => {
+    if (!iso) return "—";
+    try { return new Date(iso).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }); }
+    catch { return iso; }
+  };
+
   return (
     <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)]">
       <div className="max-w-6xl mx-auto px-6 py-8">
-        {/* Back Button */}
-        <Link 
+
+        {/* Back */}
+        <Link
           to="/talent"
-          className="inline-flex items-center gap-2 text-[rgb(37,99,235)] hover:text-[rgb(37,99,235)] mb-6 transition-colors duration-300"
+          className="inline-flex items-center gap-2 text-[rgb(37,99,235)] hover:opacity-80 mb-6 transition-opacity"
         >
           <ArrowLeft className="w-4 h-4" />
           Back to Talent Pool
         </Link>
 
-        {/* HR Only Notice */}
-        <div className="bg-[rgb(37,99,235)]/10 border border-sky-400/30 rounded-xl p-4 mb-6">
-          <div className="flex items-center gap-2 text-[rgb(37,99,235)]">
-            <Users className="w-5 h-5" />
-            <span className="font-semibold">HR Access Enabled</span>
+        {/* HR notice */}
+        <div className="bg-[rgb(37,99,235)]/10 border border-[rgb(37,99,235)]/20 rounded-xl p-4 mb-6 flex items-center gap-3">
+          <Users className="w-5 h-5 text-[rgb(37,99,235)] shrink-0" />
+          <div>
+            <p className="text-[rgb(37,99,235)] font-semibold text-sm">HR Access Enabled</p>
+            <p className="text-[rgb(71,85,105)] text-xs mt-0.5">
+              You are viewing a full candidate profile with contact information.
+            </p>
           </div>
-          <p className="text-[rgb(71,85,105)] text-sm mt-1">
-            You are viewing full candidate profile with contact information and resume access.
-          </p>
         </div>
 
         <div className="grid lg:grid-cols-3 gap-8">
-          {/* Main Content */}
-          <div className="lg:col-span-2 space-y-8">
-            {/* Profile Header */}
-            <div className="relative border border-[rgb(226,232,240)] rounded-xl">
-              <div className="bg-white rounded-xl p-6">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <h1 className="text-3xl font-bold text-[rgb(15,23,42)] mb-2">{talent.name}</h1>
-                    <p className="text-xl text-[rgb(37,99,235)] font-medium mb-4">{talent.title}</p>
-                    <p className="text-[rgb(71,85,105)] leading-relaxed">{talent.bio}</p>
-                  </div>
-                  {talent.isVerified && (
-                    <div className="flex items-center gap-2 text-green-600 bg-green-500/10 px-3 py-1 rounded-full border border-green-400/20">
-                      <Award className="w-4 h-4" />
-                      <span className="text-sm font-medium">Verified</span>
-                    </div>
+
+          {/* ── Main content ─────────────────────────────────────────────── */}
+          <div className="lg:col-span-2 space-y-6">
+
+            {/* Profile header */}
+            <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h1 className="text-3xl font-bold text-[rgb(15,23,42)] mb-1">{talent.name}</h1>
+                  {talent.title && (
+                    <p className="text-[rgb(37,99,235)] font-medium text-lg mb-3">{talent.title}</p>
                   )}
+                  <p className="text-[rgb(71,85,105)] leading-relaxed">{talent.bio}</p>
+                </div>
+                <div className="flex items-center gap-1 text-green-600 bg-green-500/10 px-3 py-1.5 rounded-full border border-green-400/20 shrink-0">
+                  <Award className="w-4 h-4" />
+                  <span className="text-sm font-medium">Verified</span>
                 </div>
               </div>
             </div>
 
-            {/* Contact Information */}
+            {/* Contact */}
             <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
-              <h2 className="text-xl font-bold text-[rgb(15,23,42)] mb-4">Contact Information</h2>
+              <h2 className="text-lg font-bold text-[rgb(15,23,42)] mb-4">Contact Information</h2>
               <div className="grid md:grid-cols-2 gap-4">
-                <div className="flex items-center gap-3">
-                  <Mail className="w-5 h-5 text-[rgb(37,99,235)]" />
-                  <div>
-                    <div className="text-sm text-[rgb(148,163,184)]">Email</div>
-                    <div className="text-[rgb(15,23,42)]">{talent.email}</div>
+                {talent.email && (
+                  <div className="flex items-center gap-3">
+                    <Mail className="w-5 h-5 text-[rgb(37,99,235)] shrink-0" />
+                    <div>
+                      <p className="text-xs text-[rgb(148,163,184)]">Email</p>
+                      <p className="text-[rgb(15,23,42)] text-sm">{talent.email}</p>
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Phone className="w-5 h-5 text-[rgb(37,99,235)]" />
-                  <div>
-                    <div className="text-sm text-[rgb(148,163,184)]">Phone</div>
-                    <div className="text-[rgb(15,23,42)]">{talent.phone}</div>
+                )}
+                {talent.phone && (
+                  <div className="flex items-center gap-3">
+                    <Phone className="w-5 h-5 text-[rgb(37,99,235)] shrink-0" />
+                    <div>
+                      <p className="text-xs text-[rgb(148,163,184)]">Phone</p>
+                      <p className="text-[rgb(15,23,42)] text-sm">{talent.phone}</p>
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <MapPin className="w-5 h-5 text-[rgb(37,99,235)]" />
-                  <div>
-                    <div className="text-sm text-[rgb(148,163,184)]">Location</div>
-                    <div className="text-[rgb(15,23,42)]">{talent.location}</div>
+                )}
+                {talent.location && (
+                  <div className="flex items-center gap-3">
+                    <MapPin className="w-5 h-5 text-[rgb(37,99,235)] shrink-0" />
+                    <div>
+                      <p className="text-xs text-[rgb(148,163,184)]">Location</p>
+                      <p className="text-[rgb(15,23,42)] text-sm">{talent.location}</p>
+                    </div>
                   </div>
-                </div>
+                )}
                 <div className="flex items-center gap-3">
-                  <Calendar className="w-5 h-5 text-[rgb(37,99,235)]" />
+                  <Calendar className="w-5 h-5 text-[rgb(37,99,235)] shrink-0" />
                   <div>
-                    <div className="text-sm text-[rgb(148,163,184)]">Availability</div>
-                    <div className="text-[rgb(15,23,42)]">{talent.availability}</div>
+                    <p className="text-xs text-[rgb(148,163,184)]">Availability</p>
+                    <p className="text-[rgb(15,23,42)] text-sm">{talent.availability}</p>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Experience */}
-            <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
-              <h2 className="text-xl font-bold text-[rgb(15,23,42)] mb-4">Work Experience</h2>
-              <div className="space-y-4">
-                {talent.experience.map((exp, index) => (
-                  <div key={index} className="border-l-2 border-sky-400 pl-4">
-                    <h3 className="text-lg font-semibold text-[rgb(15,23,42)]">{exp.role}</h3>
-                    <p className="text-[rgb(37,99,235)]">{exp.company}</p>
-                    <p className="text-[rgb(148,163,184)] text-sm">{exp.duration}</p>
-                  </div>
-                ))}
+            {/* Experience — only if present */}
+            {talent.experience?.length > 0 && (
+              <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
+                <h2 className="text-lg font-bold text-[rgb(15,23,42)] mb-4">Work Experience</h2>
+                <div className="space-y-4">
+                  {talent.experience.map((exp, i) => (
+                    <div key={i} className="border-l-2 border-[rgb(37,99,235)] pl-4">
+                      <h3 className="font-semibold text-[rgb(15,23,42)]">{exp.role}</h3>
+                      <p className="text-[rgb(37,99,235)] text-sm">{exp.company}</p>
+                      <p className="text-[rgb(148,163,184)] text-xs">{exp.duration}</p>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* Education — only if present */}
+            {talent.education && (
+              <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
+                <h2 className="text-lg font-bold text-[rgb(15,23,42)] mb-2">Education</h2>
+                <p className="text-[rgb(71,85,105)]">{talent.education}</p>
+              </div>
+            )}
           </div>
 
-          {/* Sidebar */}
+          {/* ── Sidebar ──────────────────────────────────────────────────── */}
           <div className="space-y-6">
-            {/* Resume Download */}
-            <div className="relative border border-[rgb(226,232,240)] rounded-xl">
-              <div className="bg-white rounded-xl p-6">
-                <button className="w-full bg-[rgb(37,99,235)] hover:bg-[rgb(29,78,216)] text-white font-semibold py-3 px-6 rounded-lg transition-all duration-300 flex items-center justify-center gap-2">
-                  <Download className="w-5 h-5" />
-                  Download Resume
-                </button>
+
+            {/* Salary */}
+            {talent.expected_salary && (
+              <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
+                <h3 className="text-base font-bold text-[rgb(15,23,42)] mb-2">Salary Expectations</h3>
+                <p className="text-[rgb(37,99,235)] font-semibold">{talent.expected_salary}</p>
               </div>
-            </div>
+            )}
 
             {/* Skills */}
-            <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
-              <h3 className="text-lg font-bold text-[rgb(15,23,42)] mb-4">Skills</h3>
-              <div className="flex flex-wrap gap-2">
-                {talent.skills.map((skill, index) => (
-                  <span
-                    key={index}
-                    className="text-sm text-[rgb(37,99,235)] bg-[rgb(37,99,235)]/10 px-3 py-2 rounded-lg border border-[rgb(37,99,235)]/20"
-                  >
-                    {skill}
-                  </span>
-                ))}
+            {talent.skills?.length > 0 && (
+              <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
+                <h3 className="text-base font-bold text-[rgb(15,23,42)] mb-4">Skills</h3>
+                <div className="flex flex-wrap gap-2">
+                  {talent.skills.map((skill, i) => (
+                    <span
+                      key={i}
+                      className="text-sm text-[rgb(37,99,235)] bg-[rgb(37,99,235)]/10 px-3 py-1.5 rounded-lg border border-[rgb(37,99,235)]/20"
+                    >
+                      {skill}
+                    </span>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Certifications */}
+            {/* Earned Certificates — real data */}
             <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
-              <h3 className="text-lg font-bold text-[rgb(15,23,42)] mb-4">Certifications</h3>
-              <div className="space-y-3">
-                {talent.certifications.map((cert, index) => (
-                  <div key={index} className="flex items-center gap-3">
-                    <Award className={`w-5 h-5 ${
-                      cert.type === 'course' ? 'text-green-600' : 'text-blue-400'
-                    }`} />
-                    <div>
-                      <div className="text-[rgb(15,23,42)] text-sm font-medium">{cert.name}</div>
-                      <div className="text-[rgb(148,163,184)] text-xs">{cert.date}</div>
+              <h3 className="text-base font-bold text-[rgb(15,23,42)] mb-4 flex items-center gap-2">
+                <Award className="w-5 h-5 text-[rgb(37,99,235)]" />
+                Earned Certificates ({talent.cert_count})
+              </h3>
+              <div className="space-y-4">
+                {talent.certifications.map((cert, i) => (
+                  <div key={i} className="border border-[rgb(226,232,240)] rounded-lg p-3">
+                    <div className="flex items-start gap-2 mb-2">
+                      <CheckCircle className="w-4 h-4 text-green-600 shrink-0 mt-0.5" />
+                      <p className="text-[rgb(15,23,42)] font-medium text-sm leading-snug">
+                        {cert.project_title}
+                      </p>
+                    </div>
+                    <div className="pl-6 space-y-1">
+                      {cert.category && (
+                        <p className="text-xs text-[rgb(148,163,184)]">
+                          <span className="font-medium text-[rgb(71,85,105)]">Category:</span> {cert.category}
+                        </p>
+                      )}
+                      <p className="text-xs text-[rgb(148,163,184)]">
+                        <span className="font-medium text-[rgb(71,85,105)]">Quiz Score:</span>{" "}
+                        <span className={cert.quiz_score >= 80 ? "text-green-600 font-semibold" : "text-[rgb(37,99,235)] font-semibold"}>
+                          {cert.quiz_score}%
+                        </span>
+                      </p>
+                      <p className="text-xs text-[rgb(148,163,184)]">
+                        <span className="font-medium text-[rgb(71,85,105)]">Issued:</span> {formatDate(cert.issued_at)}
+                      </p>
+                      {cert.technologies?.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-2">
+                          {cert.technologies.map((t, ti) => (
+                            <span key={ti} className="text-xs bg-[rgb(241,245,249)] text-[rgb(71,85,105)] px-2 py-0.5 rounded-full">
+                              {t}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <p className="text-xs text-[rgb(148,163,184)] font-mono mt-1">ID: {cert.certificate_id}</p>
                     </div>
                   </div>
                 ))}
               </div>
             </div>
 
-            {/* Salary Expectations */}
-            <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
-              <h3 className="text-lg font-bold text-[rgb(15,23,42)] mb-2">Salary Expectations</h3>
-              <p className="text-[rgb(37,99,235)] font-semibold">{talent.expectedSalary}</p>
-            </div>
           </div>
         </div>
       </div>
