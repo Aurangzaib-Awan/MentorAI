@@ -11,6 +11,7 @@ import Mindmap from "./pages/MindMap.jsx";
 import Divide from "./pages/Divide.jsx";
 import MentorDashboard from "./pages/mentorReview/MentorDashboard.jsx";
 import AgenticRecommendations from './pages/AgenticRecommendations.jsx';
+import Dashboard from "./pages/Dashboard.jsx";
 import { OnboardingProvider } from "./context/OnboardingContext";
 
 // PROJECT-BASED LEARNING
@@ -29,7 +30,7 @@ import QuizLauncher from "./components/QuizLauncher";
 
 // ADMIN
 import RootLayout from "./pages/admin/RootLayout.jsx";
-import Dashboard from "./pages/admin/Dashboard";
+import AdminDashboard from "./pages/admin/Dashboard";
 import UserManagement from "./pages/admin/UserManagement";
 import ContentManagement from "./pages/admin/ContentManagement";
 import ProjectManagement from "./pages/admin/ProjectManagement";
@@ -309,11 +310,21 @@ function AppRoutes({ user, setUser }) {
           </ProtectedRoute>
         }
       >
-        <Route index element={<Dashboard />} />
+        <Route index element={<AdminDashboard />} />
         <Route path="users" element={<UserManagement />} />
         <Route path="learningContent" element={<ContentManagement />} />
         <Route path="projects" element={<ProjectManagement />} />
       </Route>
+
+      {/* USER DASHBOARD */}
+      <Route
+        path="/dashboard"
+        element={
+          <ProtectedRoute user={user}>
+            <Dashboard user={user} />
+          </ProtectedRoute>
+        }
+      />
 
       {/* Ai Agent recommnedations route  */}
       <Route

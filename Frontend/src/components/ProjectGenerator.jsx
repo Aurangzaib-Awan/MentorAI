@@ -4,7 +4,7 @@ import { projectAPI } from "../services/api";
 import {
   Sparkles, Plus, X, BookOpen, CheckCircle,
   Clock, Layers, Target, ArrowRight, Code2,
-  AlertCircle, Loader2, Trophy, ChevronRight,
+  AlertCircle, Loader2, ChevronRight, ArrowLeft,
   Calendar, BarChart2, Tag, List
 } from "lucide-react";
 
@@ -93,7 +93,6 @@ export default function GenerateProjectPage({ userId }) {
   const [project, setProject] = useState(null);
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState("overview");
-  const [completing, setCompleting] = useState(false);
 
   // ========================================================================
   // SKILL MANAGEMENT
@@ -139,19 +138,6 @@ export default function GenerateProjectPage({ userId }) {
   // ========================================================================
   // MARK COMPLETE
   // ========================================================================
-  const markComplete = async () => {
-    if (!project?.project_id) return;
-    setCompleting(true);
-    try {
-      const updated = await projectAPI.completeUserProject(project.project_id);
-      setProject(prev => ({ ...prev, status: "completed", ...updated }));
-    } catch (err) {
-      setError("Failed to mark project as complete");
-    } finally {
-      setCompleting(false);
-    }
-  };
-
   // ========================================================================
   // RENDER: PROJECT RESULT
   // ========================================================================
@@ -159,7 +145,6 @@ export default function GenerateProjectPage({ userId }) {
     const technologies = project.technologies || project.skills || [];
     const tasks = project.tasks || [];
     const prerequisites = project.prerequisites || [];
-    const isCompleted = project.status === "completed";
     const catColor = CATEGORY_COLORS[project.category] || "bg-blue-50 text-blue-700";
     const diffColor = DIFFICULTY_BADGE[project.difficulty] || "bg-yellow-50 text-yellow-700";
 
@@ -173,6 +158,13 @@ export default function GenerateProjectPage({ userId }) {
     return (
       <div className="min-h-screen bg-[rgb(248,250,252)] p-6">
         <div className="max-w-4xl mx-auto">
+          <button
+            onClick={() => navigate('/projects')}
+            className="flex items-center gap-2 text-[rgb(37,99,235)] hover:text-[rgb(29,78,216)] font-semibold mb-6 transition-colors"
+          >
+            <ArrowLeft className="w-5 h-5" />
+            Back
+          </button>
 
           {/* Top bar */}
           <div className="flex items-center justify-between mb-6">
@@ -183,8 +175,8 @@ export default function GenerateProjectPage({ userId }) {
               <X className="w-4 h-4" />
               Generate New Project
             </button>
-            <span className={`px-3 py-1 rounded-full text-xs font-bold ${isCompleted ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
-              {isCompleted ? '✓ Completed' : '● In Progress'}
+            <span className="px-3 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-700">
+              ● In Progress
             </span>
           </div>
 
@@ -347,27 +339,13 @@ export default function GenerateProjectPage({ userId }) {
             </div>
           )}
           <div className="flex gap-3">
-            {!isCompleted ? (
-              <button
-                onClick={markComplete}
-                disabled={completing}
-                className="flex-1 flex items-center justify-center gap-2 bg-[rgb(37,99,235)] hover:bg-[rgb(29,78,216)] disabled:opacity-60 text-white font-bold py-3.5 px-6 rounded-xl transition-all"
-              >
-                {completing
-                  ? <><Loader2 className="w-5 h-5 animate-spin" />Marking Complete...</>
-                  : <><Trophy className="w-5 h-5" />Mark as Complete</>
-                }
-              </button>
-            ) : (
-              <button
-                onClick={() => navigate(`/project-quiz/${project.project_id}`)}
-                className="flex-1 flex items-center justify-center gap-2 bg-green-600 hover:bg-green-700 text-white font-bold py-3.5 px-6 rounded-xl transition-all"
-              >
-                <Sparkles className="w-5 h-5" />
-                Take AI Quiz Now
-                <ArrowRight className="w-5 h-5" />
-              </button>
-            )}
+            <button
+              onClick={() => navigate(`/projects/${project.project_id}/workspace`)}
+              className="flex-1 flex items-center justify-center gap-2 bg-[rgb(37,99,235)] hover:bg-[rgb(29,78,216)] text-white font-bold py-3.5 px-6 rounded-xl transition-all"
+            >
+              <ArrowRight className="w-5 h-5" />
+              Start Project
+            </button>
           </div>
 
         </div>
@@ -381,6 +359,13 @@ export default function GenerateProjectPage({ userId }) {
   return (
     <div className="min-h-screen bg-[rgb(248,250,252)] flex items-center justify-center p-6">
       <div className="max-w-2xl w-full">
+        <button
+          onClick={() => navigate('/projects')}
+          className="flex items-center gap-2 text-[rgb(37,99,235)] hover:text-[rgb(29,78,216)] font-semibold mb-6 transition-colors"
+        >
+          <ArrowLeft className="w-5 h-5" />
+          Back
+        </button>
 
         {/* Header */}
         <div className="text-center mb-8">

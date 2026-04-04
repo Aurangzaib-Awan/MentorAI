@@ -32,7 +32,7 @@ const Home = ({ user }) => {
             {/* Auth Section */}
             {user ? (
               <div className="flex items-center gap-4">
-                <Link to="/skill" className="text-[rgb(71,85,105)] hover:text-[rgb(37,99,235)] font-medium transition-colors duration-300">Dashboard</Link>
+                <Link to="/dashboard" className="text-[rgb(71,85,105)] hover:text-[rgb(37,99,235)] font-medium transition-colors duration-300">Dashboard</Link>
                 <div className="relative group">
                   <button className="flex items-center gap-2 hover:opacity-80 transition-opacity">
                     <div className="w-9 h-9 rounded-full bg-[rgb(37,99,235)] text-white flex items-center justify-center text-sm font-bold">

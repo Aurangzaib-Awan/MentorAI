@@ -1,9 +1,8 @@
 // pages/projects/ProjectSubmission.jsx
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Upload, FileText, Link, Github, CheckCircle, AlertCircle, X } from 'lucide-react';
-
-const API_BASE = 'http://localhost:8000';
+import { Upload, FileText, Link, Github, CheckCircle, AlertCircle, X, ArrowLeft } from 'lucide-react';
+import { projectAPI } from '../../services/api.js';
 
 const ProjectSubmission = ({ user }) => {
   const { projectId } = useParams();
@@ -58,25 +57,13 @@ const ProjectSubmission = ({ user }) => {
     setIsSubmitting(true);
 
     try {
-      const res = await fetch(`${API_BASE}/api/projects/submit`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: userId,
-          project_id: projectId,
-          description: formData.description,
-          github_url: formData.githubUrl,
-          live_demo_url: formData.liveDemoUrl,
-          challenges: formData.challenges,
-          learnings: formData.learnings,
-        }),
+      await projectAPI.submitUserProject(userId, projectId, {
+        description: formData.description,
+        github_url: formData.githubUrl,
+        live_demo_url: formData.liveDemoUrl,
+        challenges: formData.challenges,
+        learnings: formData.learnings,
       });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || `Server error: ${res.status}`);
-      }
 
       setShowSuccessModal(true);
     } catch (err) {
@@ -94,6 +81,13 @@ const ProjectSubmission = ({ user }) => {
   return (
     <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)] p-6">
       <div className="max-w-4xl mx-auto">
+        <button
+          onClick={() => navigate(`/projects/${projectId}/workspace`)}
+          className="flex items-center gap-2 text-[rgb(37,99,235)] hover:text-[rgb(29,78,216)] font-semibold mb-6 transition-colors"
+        >
+          <ArrowLeft className="w-5 h-5" />
+          Back to Workspace
+        </button>
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-[rgb(37,99,235)]">Submit Your Project</h1>
           <p className="text-[rgb(71,85,105)] text-lg">Share your completed work for review and feedback</p>

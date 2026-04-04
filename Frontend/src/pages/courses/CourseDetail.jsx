@@ -1,7 +1,7 @@
 // components/courses/CourseDetail.jsx
 import React, { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate, useLocation } from 'react-router-dom';
-import { Clock, Users, ChevronRight, BookOpen, PlayCircle, FileText, Star } from 'lucide-react';
+import { Clock, Users, ChevronRight, BookOpen, PlayCircle, FileText, Star, ArrowLeft } from 'lucide-react';
 import { courseAPI } from '../../services/api';
 
 const CourseDetail = ({ user }) => {
@@ -121,6 +121,14 @@ const CourseDetail = ({ user }) => {
     <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)]">
       <div className="bg-white border-b border-[rgb(226,232,240)]">
         <div className="max-w-7xl mx-auto px-6 py-8">
+          <button
+            onClick={() => navigate('/courses')}
+            className="flex items-center gap-2 text-[rgb(37,99,235)] hover:text-[rgb(29,78,216)] font-semibold mb-6 transition-colors"
+          >
+            <ArrowLeft className="w-5 h-5" />
+            Back to Courses
+          </button>
+
           <nav className="flex items-center space-x-2 text-sm text-[rgb(148,163,184)] mb-6">
             <Link to="/courses" className="hover:text-[rgb(37,99,235)] transition-colors duration-300">
               Courses

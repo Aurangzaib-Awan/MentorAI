@@ -1,5 +1,6 @@
 // pages/Divide.jsx
 import { useNavigate } from 'react-router-dom';
+import { ArrowLeft } from 'lucide-react';
 import { useOnboarding } from '../context/OnboardingContext';
 
 
@@ -50,6 +51,13 @@ const handleProjectBasedLearning = async () => {
   return (
     <div className="min-h-screen bg-[rgb(248,250,252)] py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-6xl mx-auto">
+        <button
+          onClick={() => navigate('/mindmap?career=' + onboardingData.selectedCareer)}
+          className="flex items-center gap-2 text-[rgb(37,99,235)] hover:text-[rgb(29,78,216)] font-semibold mb-8 transition-colors"
+        >
+          <ArrowLeft className="w-5 h-5" />
+          Back to Topics
+        </button>
         {/* Header */}
         <div className="text-center mb-12">
           <h1 className="text-3xl font-bold text-[rgb(37,99,235)]">

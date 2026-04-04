@@ -1,7 +1,7 @@
 // components/ProjectDetail.jsx
 import React, { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate, useLocation } from 'react-router-dom';
-import { Clock, Users, ChevronRight, BookOpen } from 'lucide-react';
+import { Clock, Users, ChevronRight, BookOpen, ArrowLeft } from 'lucide-react';
 import { projectAPI } from '../../services/api';
 
 const ProjectDetail = ({ user }) => {
@@ -11,6 +11,7 @@ const ProjectDetail = ({ user }) => {
   const [project, setProject] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [userProjectId, setUserProjectId] = useState(null); // ✅ tracks the user's project id
 
   const renderMarkdown = (text) => {
     if (!text) return '';
@@ -28,6 +29,7 @@ const ProjectDetail = ({ user }) => {
       .replace(/^(?!<[hu])(.*)$/gim, '<p class="mb-4 text-[rgb(71,85,105)] leading-relaxed">$1</p>');
   };
 
+  // ✅ Fetch the curated project details
   useEffect(() => {
     const fetchProject = async () => {
       try {
@@ -35,9 +37,12 @@ const ProjectDetail = ({ user }) => {
         const response = await projectAPI.getProjects();
         const projectsArray = response.projects || response.data || response || [];
         console.log('Projects array in ProjectDetail:', projectsArray);
-        const foundProject = projectsArray.find(p =>
-          p.id.toString() === projectId || p.id === projectId
-        );
+
+        const foundProject = projectsArray.find(p => {
+          const projectId_str = String(p.id || p._id || '');
+          return projectId_str === projectId || (p.id && p.id.toString && p.id.toString() === projectId);
+        });
+
         if (!foundProject) throw new Error('Project not found');
         setProject(foundProject);
       } catch (err) {
@@ -50,6 +55,33 @@ const ProjectDetail = ({ user }) => {
     fetchProject();
   }, [projectId]);
 
+  // ✅ Once project is loaded, find if this user already has a user_project for it
+  useEffect(() => {
+    if (!user || !project) return;
+
+    const findExistingUserProject = async () => {
+      try {
+        const userId = user.id || user._id;
+        if (!userId) return;
+
+        const data = await projectAPI.getUserProjects(userId);
+        const projects = data.projects || [];
+
+        // Match by title since the curated project and user project share the same title
+        const match = projects.find(p => p.title === project.title);
+        if (match) {
+          const id = match._id || match.project_id;
+          setUserProjectId(id);
+          console.log('✅ Found existing user project id:', id);
+        }
+      } catch (err) {
+        console.warn('Could not find existing user project:', err);
+      }
+    };
+
+    findExistingUserProject();
+  }, [user, project]);
+
   const getDifficultyColor = (level) => {
     switch (level) {
       case 'Beginner': return 'text-green-700 bg-green-50';
@@ -59,21 +91,63 @@ const ProjectDetail = ({ user }) => {
     }
   };
 
-  const handleStartProject = () => {
+  const handleStartProject = async () => {
     if (!user) {
       navigate('/login', { state: { from: location } });
       return;
     }
-    navigate(`/projects/${projectId}/workspace`);
+
+    try {
+      const userId = user.id || user._id;
+      if (!userId) {
+        alert('Could not determine user ID');
+        return;
+      }
+
+      const userProjectData = {
+        user_id: userId,
+        title: project.title,
+        description: project.description,
+        category: project.category,
+        difficulty: project.difficulty,
+        duration: project.duration,
+        technologies: project.technologies || [],
+        prerequisites: project.prerequisites || [],
+        project_description: project.project_description,
+        tasks: project.tasks || [],
+        learning_outcomes: project.learning_outcomes,
+        status: 'pending',
+      };
+
+      const response = await projectAPI.createUserProject(userProjectData);
+      const newProjectId = response._id || response.project_id || response.id;
+
+      console.log('User project created:', newProjectId);
+
+      // ✅ Save the user project id so Take Quiz uses the correct one
+      setUserProjectId(newProjectId);
+
+      navigate(`/projects/${newProjectId}/workspace`);
+    } catch (err) {
+      console.error('Error starting project:', err);
+      alert('Failed to start project. Please try again.');
+    }
   };
 
   const handleTakeQuiz = () => {
     if (!user) {
-
       navigate('/login', { state: { from: location } });
       return;
     }
-    navigate(`/project-quiz/${projectId}`);
+
+    // ✅ Always use userProjectId — never the curated projectId from URL
+    if (!userProjectId) {
+      alert('Please click "Start Project" first before taking the quiz.');
+      return;
+    }
+
+    console.log('✅ Navigating to quiz with user project id:', userProjectId);
+    navigate(`/project-quiz/${userProjectId}`);
   };
 
   if (loading) {
@@ -111,6 +185,14 @@ const ProjectDetail = ({ user }) => {
     <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)]">
       <div className="bg-white border-b border-[rgb(226,232,240)]">
         <div className="max-w-7xl mx-auto px-6 py-8">
+          <button
+            onClick={() => navigate('/projects')}
+            className="flex items-center gap-2 text-[rgb(37,99,235)] hover:text-[rgb(29,78,216)] font-semibold mb-6 transition-colors"
+          >
+            <ArrowLeft className="w-5 h-5" />
+            Back to Projects
+          </button>
+
           <nav className="flex items-center space-x-2 text-sm text-[rgb(148,163,184)] mb-6">
             <Link to="/projects" className="hover:text-[rgb(37,99,235)] transition-colors duration-300">
               Projects
@@ -150,21 +232,18 @@ const ProjectDetail = ({ user }) => {
                   </span>
                 </div>
 
-                {/* Start Project — solid blue, inverts to white+blue-border on hover */}
                 <button
                   onClick={handleStartProject}
                   className="
                     w-full font-semibold py-4 px-6 rounded-lg mb-4
                     border-2 border-[rgb(37,99,235)]
                     bg-[rgb(37,99,235)] text-white
-                   
                     transition-all duration-200
                   "
                 >
-                  {user ? 'Start Project' : 'Login to Start Project'}
+                  {user ? (userProjectId ? 'Continue Project' : 'Start Project') : 'Login to Start Project'}
                 </button>
 
-                {/* Take Quiz — outline white+blue-text, inverts to solid blue on hover */}
                 {user && (
                   <button
                     onClick={handleTakeQuiz}
@@ -175,7 +254,7 @@ const ProjectDetail = ({ user }) => {
                       transition-all duration-200
                     "
                   >
-                    Take Quiz
+                    {userProjectId ? 'Take Quiz' : 'Start Project First'}
                   </button>
                 )}
 

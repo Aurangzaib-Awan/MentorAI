@@ -1,7 +1,7 @@
 // components/ProjectsMarketplace.jsx
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate,} from 'react-router-dom';
-import { Search, Clock, Users, Sparkles, ArrowRight, Zap, Target } from 'lucide-react';
+import { Search, Clock, Users, Sparkles, ArrowRight, Zap, Target, ArrowLeft } from 'lucide-react';
 import { projectAPI } from '../../services/api';
 
 const ProjectsMarketplace = ({ user }) => {
@@ -130,6 +130,13 @@ const ProjectsMarketplace = ({ user }) => {
   return (
     <div className="min-h-screen bg-[rgb(248,250,252)] text-[rgb(15,23,42)] p-6">
       <div className="max-w-7xl mx-auto">
+        <button
+          onClick={() => navigate('/')}
+          className="flex items-center gap-2 text-[rgb(37,99,235)] hover:text-[rgb(29,78,216)] font-semibold mb-6 transition-colors"
+        >
+          <ArrowLeft className="w-5 h-5" />
+          Back
+        </button>
 
         {/* ── Hero Header ─────────────────────────────────────────────────── */}
         <div className="mb-10">

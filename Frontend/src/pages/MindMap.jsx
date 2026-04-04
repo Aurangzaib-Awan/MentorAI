@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
+import { ArrowLeft } from 'lucide-react';
 import careerPaths from '../data/mindmap.json';
 import { useOnboarding } from '../context/OnboardingContext'; // add for context
 
@@ -86,6 +87,13 @@ function Mindmap() {
 
   return (
     <div className="min-h-screen bg-[rgb(248,250,252)] py-8 sm:py-12 px-4 sm:px-6">
+      <button
+        onClick={() => navigate('/skill')}
+        className="flex items-center gap-2 text-[rgb(37,99,235)] hover:text-[rgb(29,78,216)] font-semibold mb-6 transition-colors max-w-7xl mx-auto"
+      >
+        <ArrowLeft className="w-5 h-5" />
+        Back to Career Path
+      </button>
       {/* Header */}
       <div className="text-center mb-8 sm:mb-10">
         <h1 className="text-3xl sm:text-4xl font-bold text-[rgb(37,99,235)] mb-3">

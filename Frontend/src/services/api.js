@@ -152,7 +152,7 @@ export const authAPI = {
 
   getCurrentUser: async () => {
     // Cookie is sent automatically via credentials: 'include'
-    return await apiRequest('/me');
+    return await apiRequest('/users/me');
   },
 
   changePassword: async (currentPassword, newPassword) => {
@@ -221,6 +221,11 @@ export const projectAPI = {
     });
   },
 
+  createUserProject: async (projectData) => apiRequest('/api/user-projects', {
+    method: 'POST',
+    body: JSON.stringify(projectData),
+  }),
+
   generateQuiz: async (projectId, userId) => apiRequest('/api/generate-quiz', {
     method: 'POST',
     body: JSON.stringify({ project_id: projectId, user_id: userId }),
@@ -235,11 +240,28 @@ export const projectAPI = {
     }),
   }),
 
+  startUserProject: async (projectId) => apiRequest(`/api/projects/${projectId}/start`, {
+    method: 'PATCH',
+  }),
+
   completeUserProject: async (projectId) => apiRequest(`/api/projects/${projectId}/complete`, {
     method: 'PATCH',
   }),
 
+  submitUserProject: async (userId, projectId, submissionData) => apiRequest('/api/projects/submit', {
+    method: 'POST',
+    body: JSON.stringify({
+      user_id: userId,
+      project_id: projectId,
+      ...submissionData,
+    }),
+  }),
+
   getUserProjects: async (userId) => apiRequest(`/api/projects/${userId}`),
+
+  getCertificates: async (userId) => apiRequest(`/api/certificates/${userId}`),
+  getUserProject: async (projectId) => apiRequest(`/api/user-projects/${projectId}`),
+
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

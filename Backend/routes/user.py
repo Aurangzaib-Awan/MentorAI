@@ -62,11 +62,15 @@ async def get_current_user(request: Request):
         role = role_data["role"]
 
     return {
+        "_id": str(user["_id"]),
+        "id": str(user["_id"]),
         "email": user["email"],
         "name": user.get("name", ""),
         "role": role,
         "is_admin": role == "admin",
         "is_hr": role == "hr",
         "is_mentor": role == "mentor",
-        "auth_provider": user.get("auth_provider", "local")
+        "auth_provider": user.get("auth_provider", "local"),
+        "selectedCareer": user.get("selectedCareer", ""),
+        "fullname": user.get("fullname", "")
     }

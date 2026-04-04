@@ -1,4 +1,5 @@
 from fastapi import HTTPException, APIRouter, Request, Response
+from fastapi.responses import JSONResponse
 from passlib.context import CryptContext
 import logging
 from fastapi import HTTPException
@@ -7,6 +8,7 @@ from models.login_model import Login_Model
 
 
 router = APIRouter()
+logger = logging.getLogger("auth")
 
 db = client["immersia"]
 users_collection = db["users"]
@@ -126,14 +128,53 @@ async def logout(request: Request, response: Response):
 
 @router.get("/session/csrf")
 async def get_csrf(request: Request):
-    sm = request.state.session_manager
-    sid = request.cookies.get(sm.cookie_name)
-    if not sid:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    s = sm.get_session(sid)
-    if not s:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    return {"csrf_token": s.get("csrf_token")}
+    try:
+        sm = request.state.session_manager
+        sid = request.cookies.get(sm.cookie_name)
+        
+        # If no session exists, create one for CSRF protection
+        if not sid:
+            try:
+                session = sm.create_session(request, user_email="anonymous", role="guest")
+                sid = session.get("_id")
+                logger.info(f"✅ Created anonymous session {sid} for CSRF token")
+            except Exception as e:
+                logger.error(f"❌ Failed to create session: {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Failed to create session")
+        else:
+            session = sm.get_session(sid)
+            if not session:
+                # Session expired or invalid - create new one
+                try:
+                    session = sm.create_session(request, user_email="anonymous", role="guest")
+                    sid = session.get("_id")
+                    logger.info(f"✅ Created new session {sid} (old session expired)")
+                except Exception as e:
+                    logger.error(f"❌ Failed to create replacement session: {e}", exc_info=True)
+                    raise HTTPException(status_code=500, detail="Failed to create session")
+        
+        if not session or not session.get("csrf_token"):
+            logger.error(f"❌ Session created but has no csrf_token: {session}")
+            raise HTTPException(status_code=500, detail="CSRF token not generated")
+        
+        # Return CSRF token and set session cookie
+        resp = JSONResponse({"csrf_token": session.get("csrf_token")})
+        resp.set_cookie(
+            sm.cookie_name,
+            sid,
+            max_age=int(sm.absolute_timeout.total_seconds()),
+            path="/",
+            secure=sm.cookie_secure,
+            samesite="Lax",
+            httponly=True
+        )
+        logger.info(f"✅ CSRF token returned for session {sid}")
+        return resp
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ CSRF endpoint error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.get("/me")

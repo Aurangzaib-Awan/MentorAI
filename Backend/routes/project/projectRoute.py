@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from db import client
 from models.projects import Project, UserProject, ProjectQuiz, QuizQuestion
 from pydantic import BaseModel
@@ -14,6 +14,55 @@ import random
 from utils.agent_nodes.update_knowledge_node import update_user_knowledge
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# AUTHORIZATION HELPER
+# ============================================================================
+def get_authenticated_user(request: Request) -> str:
+    """
+    Extract user ID from session cookie.
+    Raises HTTPException if user is not authenticated.
+    Returns user_id/email from session.
+    """
+    try:
+        session = getattr(request.state, 'session', None)
+        if not session:
+            logger.warning("❌ No session found on request")
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        # Session stores email as identifier
+        email = session.get("email")
+        if not email:
+            logger.warning("❌ No email in session")
+            raise HTTPException(status_code=401, detail="Invalid session")
+        
+        logger.info(f"✅ Authenticated user: {email}")
+        return email
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Session retrieval error: {e}")
+        raise HTTPException(status_code=401, detail="Authentication error")
+
+def get_user_id_from_email(email: str) -> str:
+    """
+    Convert email to user_id by querying the database.
+    Returns the MongoDB _id field as string.
+    """
+    try:
+        user = users_collection.find_one({"email": email})
+        if not user:
+            logger.warning(f"⚠️ User not found for email: {email}")
+            raise HTTPException(status_code=404, detail="User not found")
+        user_id = str(user.get("_id", email))
+        logger.info(f"Found user_id: {user_id} for email: {email}")
+        return user_id
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error looking up user: {e}")
+        # Fallback: use email as user_id if lookup fails
+        return email
 
 # ── Load .env FIRST before anything reads environment variables ──────────────
 load_dotenv()
@@ -54,6 +103,20 @@ class GenerateProjectRequest(BaseModel):
     skills: List[str]
     difficulty: Optional[str] = None
 
+class CreateUserProjectRequest(BaseModel):
+    user_id: str
+    title: str
+    description: str = ""
+    category: str = "Web Development"
+    difficulty: str = "Intermediate"
+    duration: str = "1 month"
+    technologies: List[str] = []
+    prerequisites: List[str] = []
+    project_description: str = ""
+    tasks: List[str] = []
+    learning_outcomes: str = ""
+    status: str = "pending"
+
 class ProjectSubmissionRequest(BaseModel):
     user_id: str
     project_id: str
@@ -74,47 +137,71 @@ class MentorActionRequest(BaseModel):
 def maybe_issue_certificate(user_id: str, project_id: str):
     try:
         logger.info(f"🔍 Certificate check — user: {user_id}, project: {project_id}")
+        logger.info(f"   user_id type: {type(user_id)}, value: '{user_id}'")
+        logger.info(f"   project_id type: {type(project_id)}, value: '{project_id}'")
 
+        # Check if submission is approved
         submission = submissions_collection.find_one({
             "user_id": user_id, "project_id": project_id, "status": "approved"
         })
         logger.info(f"  ↳ Submission approved: {submission is not None}")
-        if not submission:
-            return None
+        if submission:
+            logger.info(f"     Submission status: {submission.get('status')}")
+        else:
+            logger.warning(f"     ⚠️ No approved submission found for {user_id}/{project_id}")
 
+        # Check if quiz is completed ✅
         quiz = project_quizzes_collection.find_one({
             "user_id": user_id, "project_id": project_id, "is_completed": True
         })
         logger.info(f"  ↳ Quiz completed: {quiz is not None}")
+        if quiz:
+            logger.info(f"     Quiz found: _id={quiz.get('_id')}, score={quiz.get('score')}")
         if not quiz:
+            logger.warning(f"     ⚠️ No completed quiz found")
             return None
 
+        # Calculate score
         total      = len(quiz.get("questions", []))
         score      = quiz.get("score", 0)
         percentage = round((score / total) * 100) if total > 0 else 0
-        logger.info(f"  ↳ Quiz score: {percentage}%")
+        logger.info(f"  ↳ Quiz score: {score}/{total} = {percentage}%")
+        
         if percentage < 70:
+            logger.warning(f"     ⚠️ Score {percentage}% is below 70% threshold")
             return None
 
+        # Check if certificate already exists
         existing = certificates_collection.find_one({"user_id": user_id, "project_id": project_id})
         if existing:
+            logger.info(f"  ↳ Certificate already exists: {existing.get('_id')}")
             return serialize_doc(existing)
 
+        # Get project details
         project = None
         try:
             project = user_projects_collection.find_one({"_id": ObjectId(project_id)})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to find in user_projects: {e}")
+        
         if not project:
             try:
                 project = project_collection.find_one({"_id": ObjectId(project_id)})
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to find in project_collection: {e}")
 
-        project_title = (project.get("title") or project.get("project_title", "Project")) if project else "Project"
-        technologies  = project.get("technologies", []) if project else []
-        category      = project.get("category", "") if project else ""
+        if not project:
+            logger.warning(f"     ⚠️ Project not found for {project_id}")
+            project_title = "Project"
+            technologies = []
+            category = ""
+        else:
+            project_title = (project.get("title") or project.get("project_title", "Project"))
+            technologies  = project.get("technologies", [])
+            category      = project.get("category", "")
+            logger.info(f"     Project: {project_title}")
 
+        # Issue certificate
         cert_doc = {
             "user_id":        user_id,
             "project_id":     project_id,
@@ -125,13 +212,22 @@ def maybe_issue_certificate(user_id: str, project_id: str):
             "issued_at":      datetime.now(timezone.utc),
             "certificate_id": f"IMMERSIA-{user_id[-6:].upper()}-{project_id[-6:].upper()}",
         }
+        logger.info(f"  ↳ About to insert certificate: {cert_doc}")
         result = certificates_collection.insert_one(cert_doc)
         cert_doc["_id"] = result.inserted_id
-        logger.info(f"✅ Certificate issued: {cert_doc['certificate_id']}")
+        logger.info(f"✅ Certificate ISSUED: _id={result.inserted_id}, {cert_doc['certificate_id']} (score: {percentage}%)")
+        
+        # Verify it was inserted
+        verify = certificates_collection.find_one({"_id": result.inserted_id})
+        if verify:
+            logger.info(f"✅ Certificate VERIFIED in DB: {verify['_id']}")
+        else:
+            logger.error(f"❌ Certificate NOT FOUND after insert: {result.inserted_id}")
+        
         return serialize_doc(cert_doc)
 
     except Exception as e:
-        logger.error(f"Certificate issuance error: {e}")
+        logger.error(f"❌ Certificate issuance error: {e}", exc_info=True)
         return None
 
 
@@ -546,7 +642,7 @@ Description: {description}
 Tasks:
 {task_lines}"""
 
-    quiz_prompt = f"""You are a technical instructor. Write exactly 10 multiple-choice quiz questions about this project.
+    quiz_prompt = f"""You are a technical instructor. Write exactly 7 multiple-choice quiz questions about this project.
 
 {context}
 
@@ -570,7 +666,7 @@ Return ONLY this JSON:
   ]
 }}
 
-Write all 10 questions now. Cover: setup, core features, {tech_str} usage, error handling, deployment."""
+Write all 7 questions now. Cover: setup, core features, {tech_str} usage, error handling, deployment."""
 
     generated = call_gemini_json(quiz_prompt)
     parsed    = None
@@ -610,14 +706,11 @@ Write all 10 questions now. Cover: setup, core features, {tech_str} usage, error
             {"id":5,"question":f"How does {title} protect routes for authenticated users only?","options":["A) Hardcoded username check","B) JWT token validation via middleware","C) Password stored in session cookie","D) Re-enter credentials every request"],"correct_answer":"B","explanation":"JWT middleware validates tokens on protected routes."},
             {"id":6,"question":f"What happens in {title} when required fields are missing?","options":["A) Server crashes","B) Saved with null values","C) 400 Bad Request with error message","D) Redirected to login"],"correct_answer":"C","explanation":"Proper validation returns 400 with descriptive errors."},
             {"id":7,"question":f"What is the correct repository structure for {title}?","options":["A) All files in root","B) Separate folders for routes, models, middleware","C) One file per feature","D) Frontend and backend mixed"],"correct_answer":"B","explanation":"Separation of concerns makes the codebase maintainable."},
-            {"id":8,"question":f"How should {title}'s database connection be managed in production?","options":["A) New connection per request","B) Connection pool via environment variables","C) Hardcoded connection string","D) Connect on first user login"],"correct_answer":"B","explanation":"Connection pooling is efficient and secure."},
-            {"id":9,"question":f"Most important practice when deploying {title} to production?","options":["A) Disable logging","B) Secrets as environment variables, never in Git","C) Share dev and prod database","D) Disable authentication"],"correct_answer":"B","explanation":"Secrets must never be committed to source control."},
-            {"id":10,"question":f"User reports stale data in {title} after updating a record. Most likely cause?","options":["A) Server is down","B) Frontend cache not refreshed after API call","C) Database corrupted","D) JWT token expired"],"correct_answer":"B","explanation":"Stale UI almost always means frontend state was not refreshed after a successful API call."},
         ]}
 
     questions = parsed.get("questions", [])
     validated = []
-    for i, q in enumerate(questions[:10], 1):
+    for i, q in enumerate(questions[:7], 1):
         correct = str(q.get("correct_answer", "A")).strip()
         if len(correct) > 1:
             correct = correct[0].upper()
@@ -631,7 +724,7 @@ Write all 10 questions now. Cover: setup, core features, {tech_str} usage, error
             "explanation":    q.get("explanation", f"Refer to the {title} documentation.")
         })
 
-    while len(validated) < 10:
+    while len(validated) < 7:
         i = len(validated) + 1
         validated.append({
             "id": i,
@@ -665,10 +758,28 @@ Write all 10 questions now. Cover: setup, core features, {tech_str} usage, error
 async def get_projects():
     try:
         projects = list(project_collection.find())
+        
+        # Serialize all ObjectId fields (including nested)
+        def serialize_for_json(doc):
+            if isinstance(doc, dict):
+                return {k: serialize_for_json(v) for k, v in doc.items()}
+            elif isinstance(doc, list):
+                return [serialize_for_json(item) for item in doc]
+            elif isinstance(doc, ObjectId):
+                return str(doc)
+            else:
+                return doc
+        
+        projects = [serialize_for_json(p) for p in projects]
+        
+        # Ensure 'id' field exists for frontend compatibility
         for p in projects:
-            p["id"] = str(p["_id"]); del p["_id"]
+            if "_id" in p and "id" not in p:
+                p["id"] = p["_id"]
+        
         return {"projects": projects}
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error fetching projects: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/projects")
@@ -726,33 +837,86 @@ async def get_project(project_id: str):
         project = project_collection.find_one({"_id": ObjectId(project_id)})
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
-        project["id"] = str(project["_id"]); del project["_id"]
+        
+        # Serialize all ObjectId fields (including nested)
+        def serialize_for_json(doc):
+            if isinstance(doc, dict):
+                return {k: serialize_for_json(v) for k, v in doc.items()}
+            elif isinstance(doc, list):
+                return [serialize_for_json(item) for item in doc]
+            elif isinstance(doc, ObjectId):
+                return str(doc)
+            else:
+                return doc
+        
+        project = serialize_for_json(project)
+        
+        # Ensure 'id' field exists for frontend compatibility
+        if "_id" in project and "id" not in project:
+            project["id"] = project["_id"]
+        
         return project
     except HTTPException:
         raise
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error fetching project: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/projects/category/{category}")
 async def get_projects_by_category(category: str):
     try:
         projects = list(project_collection.find({"category": category}))
+        
+        # Serialize all ObjectId fields (including nested)
+        def serialize_for_json(doc):
+            if isinstance(doc, dict):
+                return {k: serialize_for_json(v) for k, v in doc.items()}
+            elif isinstance(doc, list):
+                return [serialize_for_json(item) for item in doc]
+            elif isinstance(doc, ObjectId):
+                return str(doc)
+            else:
+                return doc
+        
+        projects = [serialize_for_json(p) for p in projects]
+        
+        # Ensure 'id' field exists for frontend compatibility
         for p in projects:
-            p["id"] = str(p["_id"]); del p["_id"]
+            if "_id" in p and "id" not in p:
+                p["id"] = p["_id"]
+        
         return {"projects": projects}
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error fetching projects by category: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/projects/difficulty/{difficulty}")
 async def get_projects_by_difficulty(difficulty: str):
     try:
         projects = list(project_collection.find({"difficulty": difficulty}))
+        
+        # Serialize all ObjectId fields (including nested)
+        def serialize_for_json(doc):
+            if isinstance(doc, dict):
+                return {k: serialize_for_json(v) for k, v in doc.items()}
+            elif isinstance(doc, list):
+                return [serialize_for_json(item) for item in doc]
+            elif isinstance(doc, ObjectId):
+                return str(doc)
+            else:
+                return doc
+        
+        projects = [serialize_for_json(p) for p in projects]
+        
+        # Ensure 'id' field exists for frontend compatibility
         for p in projects:
-            p["id"] = str(p["_id"]); del p["_id"]
+            if "_id" in p and "id" not in p:
+                p["id"] = p["_id"]
+        
         return {"projects": projects}
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error fetching projects by difficulty: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
-
 
 # ============================================================================
 # QUIZ SUBMIT
@@ -782,31 +946,64 @@ async def submit_quiz(sub: QuizSubmission):
             "explanation": q.get("explanation", "")
         })
 
-    project_quizzes_collection.update_one(
+    # Mark quiz as completed
+    quiz_update = project_quizzes_collection.update_one(
         {"_id": ObjectId(sub.quiz_id)},
         {"$set": {
-            "is_completed": True, "score": score,
+            "is_completed": True,
+            "score": score,
             "user_answers": sub.user_answers,
             "submitted_at": datetime.now(timezone.utc)
         }}
     )
+    logger.info(f"Quiz {sub.quiz_id} updated: is_completed=True, score={score}, docs_modified={quiz_update.modified_count}")
 
-    project_id  = quiz_doc.get("project_id", "")
-    certificate = maybe_issue_certificate(sub.user_id, project_id)
+    project_id     = quiz_doc.get("project_id", "")
+    effective_user_id = quiz_doc.get("user_id", sub.user_id)
+
+    logger.info(f"📝 Quiz submission - user_id: {effective_user_id}, project_id: {project_id}")
+
+    total_questions = len(quiz_doc.get("questions", []))
+    passing_score   = (total_questions * 70 + 99) // 100  # ceil(70%)
+
+    if score >= passing_score:
+        logger.info(f"✅ Quiz PASSED! Score: {score}/{total_questions} (≥ {passing_score} required)")
+        try:
+            proj_result = user_projects_collection.update_one(
+                {"_id": ObjectId(project_id)},
+                {"$set": {
+                    "status": "completed",
+                    "completed_at": datetime.now(timezone.utc),
+                    "quiz_passed": True,
+                    "quiz_score": score
+                }}
+            )
+            logger.info(f"Project {project_id} marked completed: {proj_result.modified_count} docs modified")
+
+        except Exception as e:
+            logger.error(f"Failed to update project status: {e}", exc_info=True)
+    else:
+        logger.info(f"❌ Quiz FAILED! Score: {score}/{total_questions} (need ≥ {passing_score} to pass)")
+
+    logger.info(f"📋 Issuing certificate for user_id='{effective_user_id}', project_id='{project_id}'")
+    certificate = maybe_issue_certificate(effective_user_id, project_id)
+    logger.info(f"📋 Certificate result: {certificate}")
 
     return {
-        "score":       score,
-        "total":       len(quiz_doc.get("questions", [])),
-        "results":     results,
-        "certificate": certificate,
+        "score":         score,
+        "total":         total_questions,
+        "passing_score": passing_score,
+        "passed":        score >= passing_score,
+        "results":       results,
+        "certificate":   certificate,
     }
-
 
 # ============================================================================
 # PROJECT SUBMISSION
 # ============================================================================
 @router.post("/api/projects/submit")
 async def submit_project(request: ProjectSubmissionRequest):
+    # Check if already submitted
     existing = submissions_collection.find_one({
         "user_id":    request.user_id,
         "project_id": request.project_id,
@@ -830,6 +1027,20 @@ async def submit_project(request: ProjectSubmissionRequest):
         result               = submissions_collection.insert_one(doc)
         doc["_id"]           = result.inserted_id
         doc["submission_id"] = str(result.inserted_id)
+        
+        # 🔗 LINK: Update user_project to reference this submission AND change status
+        try:
+            user_projects_collection.update_one(
+                {"_id": ObjectId(request.project_id)},
+                {"$set": {
+                    "submission_id": str(result.inserted_id),
+                    "status": "submitted"  # ✅ Change from in-progress to submitted
+                }}
+            )
+            logger.info(f"✅ Project {request.project_id} status changed to SUBMITTED")
+        except Exception as e:
+            logger.warning(f"Failed to link submission: {e}")
+            
     except Exception as e:
         logger.error(f"Submission insert error: {e}")
         raise HTTPException(status_code=500, detail="Error saving submission")
@@ -844,11 +1055,28 @@ async def submit_project(request: ProjectSubmissionRequest):
 async def get_all_submissions():
     try:
         docs = list(submissions_collection.find())
+        
+        # Serialize all ObjectId fields (including nested)
+        def serialize_for_json(doc):
+            if isinstance(doc, dict):
+                return {k: serialize_for_json(v) for k, v in doc.items()}
+            elif isinstance(doc, list):
+                return [serialize_for_json(item) for item in doc]
+            elif isinstance(doc, ObjectId):
+                return str(doc)
+            else:
+                return doc
+        
+        docs = [serialize_for_json(d) for d in docs]
+        
+        # Ensure 'submission_id' field exists for frontend compatibility
         for d in docs:
-            d["submission_id"] = str(d["_id"])
-            d["_id"]           = str(d["_id"])
+            if "_id" in d and "submission_id" not in d:
+                d["submission_id"] = d["_id"]
+        
         return {"submissions": docs}
-    except Exception:
+    except Exception as e:
+        logger.error(f"Error fetching submissions: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -877,24 +1105,135 @@ async def reject_submission(submission_id: str, body: MentorActionRequest):
     )
     return {"message": "Submission rejected"}
 
-
-# ============================================================================
-# GET USER CERTIFICATES
-# ============================================================================
 @router.get("/api/certificates/{user_id}")
-async def get_user_certificates(user_id: str):
+async def get_user_certificates(user_id: str, request: Request):
     try:
-        certs = list(certificates_collection.find({"user_id": user_id}))
-        for c in certs:
-            c["_id"] = str(c["_id"])
-        return {"certificates": certs}
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal server error")
+        authenticated_email = get_authenticated_user(request)
+        logger.info(f"Fetching certs for user_id: {user_id}, session email: {authenticated_email}")
 
+        # Query by both formats — ObjectId string and email
+        certs = list(certificates_collection.find({
+            "$or": [
+                {"user_id": user_id},
+                {"user_id": authenticated_email}
+            ]
+        }))
+
+        logger.info(f"Found {len(certs)} certificates")
+
+        def serialize_for_json(doc):
+            if isinstance(doc, dict):
+                return {k: serialize_for_json(v) for k, v in doc.items()}
+            elif isinstance(doc, list):
+                return [serialize_for_json(item) for item in doc]
+            elif isinstance(doc, ObjectId):
+                return str(doc)
+            else:
+                return doc
+
+        certs = [serialize_for_json(c) for c in certs]
+        return {"certificates": certs}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Certificate retrieval error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error") 
 
 # ============================================================================
 # USER PROJECT ROUTES
 # ============================================================================
+
+# Certificate reconciliation endpoint - for manual fixing if needed
+@router.post("/api/projects/{project_id}/reconcile-certificate")
+async def reconcile_certificate(project_id: str):
+    """
+    Check if a project should have a certificate and issue one if missing.
+    Called when quiz is passed but certificate wasn't created.
+    """
+    try:
+        project = user_projects_collection.find_one({"_id": ObjectId(project_id)})
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        user_id = project.get("user_id", "")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Project has no user_id")
+        
+        logger.info(f"Reconciling certificate for {user_id}/{project_id}")
+        
+        # Check if quiz passed
+        quiz = project_quizzes_collection.find_one({
+            "user_id": user_id, "project_id": project_id, "is_completed": True
+        })
+        if not quiz:
+            candidate = project_quizzes_collection.find_one({
+                "project_id": project_id, "is_completed": True
+                })
+            if candidate and str(candidate.get("user_id", "")).lower() in [user_id.lower(), user_id]:
+                quiz = candidate
+                logger.info(f"Found quiz via fallback for project {project_id}")
+        
+        total = len(quiz.get("questions", []))
+        score = quiz.get("score", 0)
+        percentage = round((score / total) * 100) if total > 0 else 0
+        
+        if percentage < 70:
+            raise HTTPException(status_code=400, detail=f"Quiz score {percentage}% is below 70%")
+        
+        # Check if certificate already exists
+        existing = certificates_collection.find_one({"user_id": user_id, "project_id": project_id})
+        if existing:
+            logger.info(f"Certificate already exists for {project_id}")
+            return {"message": "Certificate already exists", "certificate_id": existing.get("certificate_id")}
+        
+        # Issue certificate
+        project_title = project.get("title", project.get("project_title", "Project"))
+        technologies = project.get("technologies", [])
+        category = project.get("category", "")
+        
+        cert_doc = {
+            "user_id": user_id,
+            "project_id": project_id,
+            "project_title": project_title,
+            "category": category,
+            "technologies": technologies,
+            "quiz_score": percentage,
+            "issued_at": datetime.now(timezone.utc),
+            "certificate_id": f"IMMERSIA-{user_id[-6:].upper()}-{project_id[-6:].upper()}",
+        }
+        result = certificates_collection.insert_one(cert_doc)
+        logger.info(f"✅ Certificate reconciled: {cert_doc['certificate_id']}")
+        return {"message": "Certificate issued", "certificate_id": cert_doc["certificate_id"]}
+    
+    except ObjectId.InvalidObjectId:
+        raise HTTPException(status_code=400, detail="Invalid project_id format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Certificate reconciliation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@router.patch("/api/projects/{project_id}/start")
+async def start_user_project(project_id: str):
+    try:
+        logger.info(f"Starting project with _id: {project_id}")
+        result = user_projects_collection.update_one(
+            {"_id": ObjectId(project_id)},
+            {"$set": {"status": "in-progress"}}
+        )
+        logger.info(f"Update result - matched: {result.matched_count}, modified: {result.modified_count}")
+    except Exception as e:
+        logger.error(f"Error updating project: {e}")
+        raise HTTPException(status_code=400, detail="Invalid project_id")
+    if result.matched_count == 0:
+        logger.warning(f"Project not found for _id: {project_id}")
+        raise HTTPException(status_code=404, detail="Project not found")
+    updated = user_projects_collection.find_one({"_id": ObjectId(project_id)})
+    if updated:
+        logger.info(f"✅ Project {project_id} status changed to IN-PROGRESS")
+    return serialize_doc(updated) if updated else {}
+
 @router.patch("/api/projects/{project_id}/complete")
 async def complete_user_project(project_id: str):
     try:
@@ -907,20 +1246,135 @@ async def complete_user_project(project_id: str):
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Project not found")
     updated = user_projects_collection.find_one({"_id": ObjectId(project_id)})
-    if updated:
-        updated["project_id"] = str(updated.get("_id"))
-        updated["_id"]        = str(updated.get("_id"))
-    return updated
+    return serialize_doc(updated) if updated else {}
+
+@router.post("/api/user-projects")
+async def create_user_project(request: CreateUserProjectRequest):
+    """Create a user project from marketplace template or other source.
+    
+    ✅ Prevents duplicates by checking if user already has this project
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        
+        # 🔍 CHECK FOR DUPLICATES: Does user already have a project with this title?
+        existing = user_projects_collection.find_one({
+            "user_id": request.user_id,
+            "title": request.title
+        })
+        
+        if existing:
+            logger.info(f"User {request.user_id} already has project '{request.title}'")
+            existing['_id'] = str(existing.get('_id'))
+            existing['project_id'] = str(existing.get('_id'))
+            return serialize_doc(existing)  # Return existing, don't duplicate
+        
+        user_project = {
+            "user_id": request.user_id,
+            "title": request.title,
+            "description": request.description,
+            "category": request.category,
+            "difficulty": request.difficulty,
+            "duration": request.duration,
+            "technologies": request.technologies,
+            "prerequisites": request.prerequisites,
+            "project_description": request.project_description,
+            "tasks": request.tasks,
+            "learning_outcomes": request.learning_outcomes,
+            "status": request.status,
+            "created_at": now,
+            "submission_id": None,  # Will be set when submitted
+            "quiz_id": None,  # Will be set when quiz created
+        }
+        
+        logger.info(f"Creating NEW user project for user {request.user_id}: {request.title}")
+        result = user_projects_collection.insert_one(user_project)
+        user_project['_id'] = result.inserted_id
+        user_project['project_id'] = str(result.inserted_id)
+        
+        logger.info(f"User project created successfully: {result.inserted_id}")
+        return serialize_doc(user_project)
+    except Exception as e:
+        logger.error(f"Error creating user project: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create project")
 
 @router.get("/api/projects/{user_id}")
-async def get_user_projects(user_id: str):
+async def get_user_projects(user_id: str, request: Request):
     try:
-        projects = list(user_projects_collection.find({"user_id": user_id}))
+        authenticated_email = get_authenticated_user(request)
+        logger.info(f"Fetching projects for user_id: {user_id}, session email: {authenticated_email}")
+
+        # Query by both the passed user_id AND the session email
+        # Covers cases where projects were saved with either format
+        projects = list(user_projects_collection.find({
+            "$or": [
+                {"user_id": user_id},
+                {"user_id": authenticated_email}
+            ]
+        }))
+
+        logger.info(f"Found {len(projects)} projects")
+
+        def serialize_for_json(doc):
+            if isinstance(doc, dict):
+                return {k: serialize_for_json(v) for k, v in doc.items()}
+            elif isinstance(doc, list):
+                return [serialize_for_json(item) for item in doc]
+            elif isinstance(doc, ObjectId):
+                return str(doc)
+            else:
+                return doc
+
+        projects = [serialize_for_json(p) for p in projects]
         for p in projects:
-            p["project_id"] = str(p.get("_id"))
-            p["_id"]        = str(p.get("_id"))
+            if "_id" in p and "id" not in p:
+                p["id"] = p["_id"]
+            if "_id" in p and "project_id" not in p:
+                p["project_id"] = p["_id"]
+
         return {"projects": projects}
-    except Exception:
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching projects: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# ============================================================================
+# GET SINGLE USER PROJECT BY PROJECT ID (for status updates)
+# ============================================================================
+@router.get("/api/user-projects/{project_id}")
+async def get_user_project(project_id: str):
+    """Fetch a single user project by its ID (not user_id)"""
+    try:
+        try:
+            obj_id = ObjectId(project_id)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid project_id format")
+        
+        project = user_projects_collection.find_one({"_id": obj_id})
+        if not project:
+            raise HTTPException(status_code=404, detail="User project not found")
+        
+        # Proper serialization: convert ALL ObjectId fields to strings
+        def serialize_for_json(doc):
+            """Recursively convert ObjectId fields to strings"""
+            if isinstance(doc, dict):
+                return {k: serialize_for_json(v) for k, v in doc.items()}
+            elif isinstance(doc, list):
+                return [serialize_for_json(item) for item in doc]
+            elif isinstance(doc, ObjectId):
+                return str(doc)
+            else:
+                return doc
+        
+        project = serialize_for_json(project)
+        logger.info(f"Fetched user_project {project_id}: status={project.get('status')}, quiz_passed={project.get('quiz_passed')}")
+        return project
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching user project: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
     
 # ============================================================================
@@ -947,9 +1401,7 @@ async def approve_submission(submission_id: str, body: MentorActionRequest):
     user_id    = doc.get("user_id", "")
     project_id = doc.get("project_id", "")
 
-    print(f"[approve] user_id: {user_id}")
-    print(f"[approve] project_id: {project_id}")
-    print(f"[approve] looking for user_project with _id: {project_id}")
+    logger.info(f"Approving submission {submission_id}: user={user_id}, project={project_id}")
 
     # 1. Mark submission as approved
     submissions_collection.update_one(
@@ -962,25 +1414,33 @@ async def approve_submission(submission_id: str, body: MentorActionRequest):
         }}
     )
 
-    # 2. Mark the user_project as completed
+    # 2. Mark the user_project as APPROVED (new status between in-progress and completed)
     try:
-        user_projects_collection.update_one(
-            {"project_id": project_id},
+        update_result = user_projects_collection.update_one(
+            {"_id": ObjectId(project_id)},
             {"$set": {
-                "status":       "completed",
-                "completed_at": datetime.now(timezone.utc),
+                "status": "approved",  # ✅ Update status to approved
+                "submission_id": doc.get("_id"),
+                "submission_approved": True,
+                "submission_approved_at": datetime.now(timezone.utc),
+                "mentor_id": body.mentor_id,
             }}
         )
+        if update_result.matched_count > 0:
+            logger.info(f"✅ Project {project_id} status updated to APPROVED")
+        else:
+            logger.warning(f"⚠️ Project {project_id} not found for update")
     except Exception as e:
-        logger.warning(f"Could not mark user_project {project_id} as completed: {e}")
+        logger.error(f"❌ Failed to update user_project {project_id}: {e}")
 
     # 3. Move targeted skills from unknownTopics → knownTopics on the User doc
     try:
-        user_proj = user_projects_collection.find_one({"project_id": project_id})
+        user_proj = user_projects_collection.find_one({"_id": ObjectId(project_id)})
         if user_proj:
             skills_to_promote = user_proj.get("skills", [])  # targeted skills
             if skills_to_promote:
                 update_user_knowledge(user_id, skills_to_promote, users_collection)
+                logger.info(f"Updated knowledge for user {user_id}")
     except Exception as e:
         logger.warning(f"Could not update knowledge for user {user_id}: {e}")
 
