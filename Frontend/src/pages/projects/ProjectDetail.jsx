@@ -1,7 +1,7 @@
 // components/ProjectDetail.jsx
 import React, { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate, useLocation } from 'react-router-dom';
-import { Clock, Users, ChevronRight, BookOpen, ArrowLeft } from 'lucide-react';
+import { Clock, Users, ChevronRight, BookOpen, ArrowLeft, Award, CheckCircle, Clock as ClockIcon, ChevronDown, ChevronUp } from 'lucide-react';
 import { projectAPI } from '../../services/api';
 
 const ProjectDetail = ({ user }) => {
@@ -11,7 +11,14 @@ const ProjectDetail = ({ user }) => {
   const [project, setProject] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [userProjectId, setUserProjectId] = useState(null); // ✅ tracks the user's project id
+  const [userProjectId, setUserProjectId] = useState(null);
+
+  // ── Certificate / progress state ──────────────────────────────────────────
+  const [certificate, setCertificate] = useState(null);
+  const [certLoading, setCertLoading] = useState(false);
+  const [submissionStatus, setSubmissionStatus] = useState(null);
+  const [projectData, setProjectData] = useState(null);
+  const [showProgress, setShowProgress] = useState(false); // collapsible toggle
 
   const renderMarkdown = (text) => {
     if (!text) return '';
@@ -29,7 +36,12 @@ const ProjectDetail = ({ user }) => {
       .replace(/^(?!<[hu])(.*)$/gim, '<p class="mb-4 text-[rgb(71,85,105)] leading-relaxed">$1</p>');
   };
 
-  // ✅ Fetch the curated project details
+  // ── Resolve user_id (same pattern as ProjectWorkspace) ────────────────────
+  const userId = user?.id || user?._id || (() => {
+    try { return JSON.parse(sessionStorage.getItem('user') || '{}')?.id; } catch { return null; }
+  })();
+
+  // ── Fetch curated project list ────────────────────────────────────────────
   useEffect(() => {
     const fetchProject = async () => {
       try {
@@ -55,19 +67,18 @@ const ProjectDetail = ({ user }) => {
     fetchProject();
   }, [projectId]);
 
-  // ✅ Once project is loaded, find if this user already has a user_project for it
+  // ── Find existing user project once project is loaded ─────────────────────
   useEffect(() => {
     if (!user || !project) return;
 
     const findExistingUserProject = async () => {
       try {
-        const userId = user.id || user._id;
-        if (!userId) return;
+        const uid = user.id || user._id;
+        if (!uid) return;
 
-        const data = await projectAPI.getUserProjects(userId);
+        const data = await projectAPI.getUserProjects(uid);
         const projects = data.projects || [];
 
-        // Match by title since the curated project and user project share the same title
         const match = projects.find(p => p.title === project.title);
         if (match) {
           const id = match._id || match.project_id;
@@ -81,6 +92,206 @@ const ProjectDetail = ({ user }) => {
 
     findExistingUserProject();
   }, [user, project]);
+
+  // ── Fetch certificate + submission status once we have userProjectId ───────
+  useEffect(() => {
+    if (!userId || !userProjectId) return;
+
+    const fetchCertStatus = async () => {
+      setCertLoading(true);
+      try {
+        // Check for existing certificate
+        const certData = await projectAPI.getCertificates(userId);
+        const certs = certData.certificates || [];
+        const match = certs.find(c => c.project_id === userProjectId);
+        if (match) {
+          setCertificate(match);
+          setCertLoading(false);
+          return;
+        }
+
+        // Fetch user project data (quiz status, etc.)
+        try {
+          const projData = await projectAPI.getUserProject(userProjectId);
+          setProjectData(projData);
+          console.log('Project data fetched:', projData);
+        } catch (err) {
+          console.error('Failed to fetch project data:', err);
+        }
+
+        // Check submission status
+        const subRes = await fetch(`http://localhost:8000/api/submissions`, { credentials: 'include' });
+        const subData = await subRes.json();
+        const subs = subData.submissions || [];
+        const mySub = subs.find(s => s.user_id === userId && s.project_id === userProjectId);
+        if (mySub) setSubmissionStatus(mySub.status);
+
+      } catch (err) {
+        console.error('Certificate status fetch failed:', err);
+      } finally {
+        setCertLoading(false);
+      }
+    };
+
+    fetchCertStatus();
+  }, [userId, userProjectId]);
+
+  // ── Manual refresh handler ────────────────────────────────────────────────
+  const handleRefreshProgress = async () => {
+    if (!userId || !userProjectId) return;
+    setCertLoading(true);
+    try {
+      const projData = await projectAPI.getUserProject(userProjectId);
+      setProjectData(projData);
+
+      const certData = await projectAPI.getCertificates(userId);
+      const certs = certData.certificates || [];
+      const match = certs.find(c => c.project_id === userProjectId);
+      if (match) setCertificate(match);
+    } catch (err) {
+      console.error('Failed to refresh progress:', err);
+    } finally {
+      setCertLoading(false);
+    }
+  };
+
+  // ── Certificate / progress section renderer ───────────────────────────────
+  const renderCertificateSection = () => {
+    if (certLoading) {
+      return (
+        <div className="flex items-center justify-center py-6">
+          <div className="w-6 h-6 border-2 border-[rgb(37,99,235)] border-t-transparent rounded-full animate-spin"></div>
+          <span className="ml-2 text-sm text-[rgb(148,163,184)]">Loading progress...</span>
+        </div>
+      );
+    }
+
+    // ── Certificate earned ──────────────────────────────────────────────────
+    if (certificate) {
+      return (
+        <div
+          style={{ background: 'linear-gradient(135deg, rgb(37,99,235) 0%, rgb(79,70,229) 100%)' }}
+          className="rounded-xl p-4 mt-1"
+        >
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 bg-white/15 rounded-lg flex items-center justify-center shrink-0">
+              <Award className="w-5 h-5 text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <h3 className="text-white font-bold text-sm">Certificate Earned!</h3>
+                <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-white/20 text-white">✓</span>
+              </div>
+              <p className="text-blue-100 text-xs truncate">{certificate.project_title}</p>
+              <p className="text-blue-200 text-xs mt-1">
+                Score: {certificate.quiz_score}% · {new Date(certificate.issued_at).toLocaleDateString()}
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Step-by-step progress ───────────────────────────────────────────────
+    const steps = [
+      {
+        label: 'Project Submitted',
+        done: !!submissionStatus,
+        active: !submissionStatus,
+        desc: submissionStatus ? `Status: ${submissionStatus}` : 'Submit your project for mentor review',
+      },
+      {
+        label: 'Mentor Approved',
+        done: submissionStatus === 'approved',
+        active: submissionStatus === 'pending',
+        desc:
+          submissionStatus === 'approved'
+            ? 'Project approved ✓'
+            : submissionStatus === 'rejected'
+            ? 'Changes requested — resubmit'
+            : 'Waiting for mentor review',
+      },
+      {
+        label: 'Quiz Passed',
+        done: projectData?.status === 'completed' || projectData?.quiz_passed === true,
+        active:
+          submissionStatus === 'approved' &&
+          !(projectData?.status === 'completed' || projectData?.quiz_passed === true),
+        desc:
+          projectData?.status === 'completed' || projectData?.quiz_passed === true
+            ? `Quiz passed with ${projectData?.quiz_score ? Math.round((projectData.quiz_score / 7) * 100) : 0}% ✓`
+            : submissionStatus !== 'approved'
+            ? 'Complete submission and mentor approval first'
+            : 'Pass the project quiz with ≥ 70%',
+      },
+    ];
+
+    return (
+      <div className="mt-1 space-y-2">
+        {steps.map((step, i) => (
+          <div
+            key={i}
+            className={`flex items-center gap-3 p-2.5 rounded-lg border ${
+              step.done
+                ? 'bg-green-50 border-green-200'
+                : step.active
+                ? 'bg-blue-50 border-blue-200'
+                : 'bg-[rgb(248,250,252)] border-[rgb(226,232,240)]'
+            }`}
+          >
+            <div
+              className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
+                step.done
+                  ? 'bg-green-500'
+                  : step.active
+                  ? 'bg-[rgb(37,99,235)]'
+                  : 'bg-[rgb(226,232,240)]'
+              }`}
+            >
+              {step.done ? (
+                <CheckCircle className="w-3.5 h-3.5 text-white" />
+              ) : (
+                <ClockIcon className="w-3.5 h-3.5 text-white" />
+              )}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p
+                className={`text-xs font-semibold ${
+                  step.done
+                    ? 'text-green-700'
+                    : step.active
+                    ? 'text-[rgb(37,99,235)]'
+                    : 'text-[rgb(148,163,184)]'
+                }`}
+              >
+                {step.label}
+              </p>
+              <p className="text-xs text-[rgb(148,163,184)] truncate">{step.desc}</p>
+            </div>
+            <span
+              className={`text-xs font-bold px-2 py-0.5 rounded-full shrink-0 ${
+                step.done
+                  ? 'bg-green-100 text-green-700'
+                  : step.active
+                  ? 'bg-blue-100 text-[rgb(37,99,235)]'
+                  : 'bg-[rgb(241,245,249)] text-[rgb(148,163,184)]'
+              }`}
+            >
+              {step.done ? 'Done' : step.active ? 'Active' : 'Pending'}
+            </span>
+          </div>
+        ))}
+
+        {/* Refresh button */}
+        <button
+          onClick={handleRefreshProgress}
+          className="w-full text-xs py-1.5 bg-blue-50 text-[rgb(37,99,235)] rounded-lg hover:bg-blue-100 transition font-semibold mt-1"
+        >
+          Refresh Progress
+        </button>
+      </div>
+    );
+  };
 
   const getDifficultyColor = (level) => {
     switch (level) {
@@ -98,14 +309,14 @@ const ProjectDetail = ({ user }) => {
     }
 
     try {
-      const userId = user.id || user._id;
-      if (!userId) {
+      const uid = user.id || user._id;
+      if (!uid) {
         alert('Could not determine user ID');
         return;
       }
 
       const userProjectData = {
-        user_id: userId,
+        user_id: uid,
         title: project.title,
         description: project.description,
         category: project.category,
@@ -123,8 +334,6 @@ const ProjectDetail = ({ user }) => {
       const newProjectId = response._id || response.project_id || response.id;
 
       console.log('User project created:', newProjectId);
-
-      // ✅ Save the user project id so Take Quiz uses the correct one
       setUserProjectId(newProjectId);
 
       navigate(`/projects/${newProjectId}/workspace`);
@@ -140,7 +349,6 @@ const ProjectDetail = ({ user }) => {
       return;
     }
 
-    // ✅ Always use userProjectId — never the curated projectId from URL
     if (!userProjectId) {
       alert('Please click "Start Project" first before taking the quiz.');
       return;
@@ -223,7 +431,7 @@ const ProjectDetail = ({ user }) => {
               </div>
             </div>
 
-            {/* Sidebar */}
+            {/* ── Sidebar ── */}
             <div className="border border-[rgb(226,232,240)] rounded-xl w-full lg:w-80">
               <div className="bg-white rounded-xl p-6 h-full">
                 <div className="text-center mb-6">
@@ -232,32 +440,52 @@ const ProjectDetail = ({ user }) => {
                   </span>
                 </div>
 
+                {/* Start / Continue button */}
                 <button
                   onClick={handleStartProject}
-                  className="
-                    w-full font-semibold py-4 px-6 rounded-lg mb-4
-                    border-2 border-[rgb(37,99,235)]
-                    bg-[rgb(37,99,235)] text-white
-                    transition-all duration-200
-                  "
+                  className="w-full font-semibold py-4 px-6 rounded-lg mb-4 border-2 border-[rgb(37,99,235)] bg-[rgb(37,99,235)] text-white transition-all duration-200"
                 >
                   {user ? (userProjectId ? 'Continue Project' : 'Start Project') : 'Login to Start Project'}
                 </button>
 
+                {/* Quiz button */}
                 {user && (
                   <button
                     onClick={handleTakeQuiz}
-                    className="
-                      w-full font-semibold py-4 px-6 rounded-lg mb-4
-                      border-2 border-[rgb(37,99,235)]
-                      bg-white text-[rgb(37,99,235)]
-                      transition-all duration-200
-                    "
+                    className="w-full font-semibold py-4 px-6 rounded-lg mb-4 border-2 border-[rgb(37,99,235)] bg-white text-[rgb(37,99,235)] transition-all duration-200"
                   >
                     {userProjectId ? 'Take Quiz' : 'Start Project First'}
                   </button>
                 )}
 
+                {/* ── Certificate Progress (collapsible) ── */}
+                {user && userProjectId && (
+                  <div className="border border-[rgb(226,232,240)] rounded-xl overflow-hidden">
+                    {/* Toggle header */}
+                    <button
+                      onClick={() => setShowProgress(prev => !prev)}
+                      className="w-full flex items-center justify-between px-4 py-3 bg-[rgb(248,250,252)] hover:bg-[rgb(241,245,249)] transition-colors"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Award className="w-4 h-4 text-[rgb(37,99,235)]" />
+                        <span className="text-sm font-semibold text-[rgb(15,23,42)]">Certificate Progress</span>
+                      </div>
+                      {showProgress
+                        ? <ChevronUp className="w-4 h-4 text-[rgb(148,163,184)]" />
+                        : <ChevronDown className="w-4 h-4 text-[rgb(148,163,184)]" />
+                      }
+                    </button>
+
+                    {/* Collapsible body */}
+                    {showProgress && (
+                      <div className="px-4 pb-4 pt-2 bg-white">
+                        {renderCertificateSection()}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Not logged in — login/signup links */}
                 {!user && (
                   <div className="text-center text-sm text-[rgb(148,163,184)] mb-4">
                     <p>You need to be logged in to start this project</p>
