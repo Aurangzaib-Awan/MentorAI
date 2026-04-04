@@ -1,52 +1,87 @@
-// pages/Divide.jsx
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { useOnboarding } from '../context/OnboardingContext';
 
-
-function Divide() {
+function Divide({ setUser }) {
   const navigate = useNavigate();
   const { onboardingData, updateOnboarding } = useOnboarding();
   const unknownTopics = onboardingData.unknownTopics;
 
   const handleCourseLearning = async () => {
-  updateOnboarding({ learningStyle: 'course' });
-  await saveOnboardingData('course');
-};
+    updateOnboarding({ learningStyle: 'course' });
+    await saveOnboardingData('course');
+  };
 
-const handleProjectBasedLearning = async () => {
-  updateOnboarding({ learningStyle: 'project' });
-  await saveOnboardingData('project');
-};
+  const handleProjectBasedLearning = async () => {
+    updateOnboarding({ learningStyle: 'project' });
+    await saveOnboardingData('project');
+  };
+
   const saveOnboardingData = async (learningStyle) => {
-  try {
-    const payload = {
-      selectedCareer: onboardingData.selectedCareer,
-      knownTopics: onboardingData.knownTopics,
-      unknownTopics: onboardingData.unknownTopics,
-      learningStyle,
-    };
+    try {
+      // Fetch CSRF token first
+      let csrfToken = null;
+      try {
+        const csrfRes = await fetch('http://localhost:8000/session/csrf', {
+          credentials: 'include'
+        });
+        if (csrfRes.ok) {
+          const csrfData = await csrfRes.json();
+          csrfToken = csrfData.csrf_token;
+        }
+      } catch (e) {
+        console.warn('Could not fetch CSRF token:', e);
+      }
 
-    const response = await fetch('http://localhost:8000/users/me', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify(payload),
-    });
+      const payload = {
+        selectedCareer: onboardingData.selectedCareer,
+        knownTopics:    onboardingData.knownTopics,
+        unknownTopics:  onboardingData.unknownTopics,
+        learningStyle,
+      };
 
-    if (!response.ok) throw new Error('Failed to save onboarding data');
+      const response = await fetch('http://localhost:8000/users/me', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfToken && { 'X-CSRF-Token': csrfToken }),
+        },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
 
-    // Navigate after successful save
-    if (learningStyle === 'course') {
-      navigate('/courses');
-    } else {
-      navigate('/projects');
+      if (!response.ok) throw new Error('Failed to save onboarding data');
+
+      // ✅ Update BOTH sessionStorage and App.jsx React state
+      try {
+        const cached = JSON.parse(sessionStorage.getItem('user') || '{}');
+        const updated = {
+          ...cached,
+          selectedCareer: onboardingData.selectedCareer,
+          learningStyle,
+          knownTopics:    onboardingData.knownTopics,
+          unknownTopics:  onboardingData.unknownTopics,
+        };
+        sessionStorage.setItem('user', JSON.stringify(updated));
+
+        // ✅ This updates App.jsx state which flows down to Dashboard as prop
+        if (setUser) setUser(updated);
+
+        console.log('✅ User updated with career:', onboardingData.selectedCareer);
+      } catch (e) {
+        console.warn('Could not update session cache:', e);
+      }
+
+      if (learningStyle === 'course') {
+        navigate('/courses');
+      } else {
+        navigate('/projects');
+      }
+
+    } catch (err) {
+      console.error('Onboarding save failed:', err);
     }
-
-  } catch (err) {
-    console.error('Onboarding save failed:', err);
-  }
-};
+  };
 
   return (
     <div className="min-h-screen bg-[rgb(248,250,252)] py-12 px-4 sm:px-6 lg:px-8">
@@ -58,6 +93,7 @@ const handleProjectBasedLearning = async () => {
           <ArrowLeft className="w-5 h-5" />
           Back to Topics
         </button>
+
         {/* Header */}
         <div className="text-center mb-12">
           <h1 className="text-3xl font-bold text-[rgb(37,99,235)]">
@@ -75,6 +111,7 @@ const handleProjectBasedLearning = async () => {
 
         {/* Learning Style Cards */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 max-w-4xl mx-auto">
+
           {/* Course Learning Card */}
           <div
             onClick={handleCourseLearning}
@@ -92,7 +129,6 @@ const handleProjectBasedLearning = async () => {
                   Structured & Comprehensive
                 </p>
               </div>
-
               <ul className="space-y-3 text-[rgb(71,85,105)]">
                 <li className="flex items-start">
                   <span className="text-green-600 mr-3 mt-1 flex-shrink-0">✓</span>
@@ -111,7 +147,6 @@ const handleProjectBasedLearning = async () => {
                   <span>Gradual progression from basics to advanced</span>
                 </li>
               </ul>
-
               <div className="mt-6 pt-6 border-t border-[rgb(226,232,240)]">
                 <p className="text-[rgb(148,163,184)] text-sm text-center">
                   Ideal for building strong fundamentals
@@ -137,7 +172,6 @@ const handleProjectBasedLearning = async () => {
                   Hands-on & Practical
                 </p>
               </div>
-
               <ul className="space-y-3 text-[rgb(71,85,105)]">
                 <li className="flex items-start">
                   <span className="text-green-600 mr-3 mt-1 flex-shrink-0">✓</span>
@@ -156,7 +190,6 @@ const handleProjectBasedLearning = async () => {
                   <span>Problem-solving focused approach</span>
                 </li>
               </ul>
-
               <div className="mt-6 pt-6 border-t border-[rgb(226,232,240)]">
                 <p className="text-[rgb(148,163,184)] text-sm text-center">
                   Ideal for rapid skill application

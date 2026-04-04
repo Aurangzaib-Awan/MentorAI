@@ -30,10 +30,11 @@ CSRF_EXEMPT_PREFIXES = (
     "/api/generate-project",  # Gemini project generation
     "/api/generate-quiz",     # Gemini quiz generation
     "/api/quiz/submit",       # Quiz submission
-    "/api/user-projects",     # ✅ Create/fetch user projects (called frequently)
-    "/api/projects/",         # ✅ FIX 2: covers PATCH /api/projects/{id}/complete
+    "/api/user-projects",     # Create/fetch user projects
+    "/api/projects/",         # Project operations
+    "/api/certificates/",     # Certificate operations
     "/api/submissions/",
-    "/users/me", 
+    "/users/",                # User profile operations (onboarding, preferences)
 )
 
 

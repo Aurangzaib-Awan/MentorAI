@@ -242,13 +242,13 @@ function AppRoutes({ user, setUser }) {
         />
 
         <Route
-          path="/divide"
-          element={
-            <ProtectedRoute user={user}>
-              <Divide />
-            </ProtectedRoute>
-          }
-        />
+  path="/divide"
+  element={
+    <ProtectedRoute user={user}>
+      <Divide setUser={setUser} />
+    </ProtectedRoute>
+  }
+/>
       </Route>
 
 
