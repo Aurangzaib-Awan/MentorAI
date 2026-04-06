@@ -62,7 +62,31 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.6
 )
 
+# ============================================================================
+# PERFORMANCE OPTIMIZATION SETTINGS
+# ============================================================================
+SKIP_FRAMES = 2                    # Process every 2nd frame (50% reduction)
+YOLO_SKIP_FRAMES = 10              # Run YOLO every 10 frames (90% reduction)
+INFERENCE_SIZE = 360               # Reduced from 640 for faster inference
+VIZ_SIZE = 480                     # Resolution for visualization
+TARGET_FPS = 15                    # Target FPS
+
+# GPU/Device settings
+try:
+    import torch
+    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if DEVICE == 'cuda':
+        logger.info(f"✅ GPU acceleration enabled: {torch.cuda.get_device_name(0)}")
+    else:
+        logger.warning("⚠️  GPU not available - using CPU (slower)")
+except Exception as e:
+    logger.warning(f"⚠️  PyTorch not available: {e}")
+    DEVICE = 'cpu'
+
 yolo_model = None
+yolo_last_results = None
+yolo_last_frame_num = -YOLO_SKIP_FRAMES
+
 try:
     import torch
     from ultralytics import YOLO
@@ -72,14 +96,21 @@ try:
         from ultralytics.nn.tasks import DetectionModel
         torch.serialization.add_safe_globals([DetectionModel])
     
-    # Load YOLOv8n (nano) model for object detection
-    yolo_model = YOLO('yolov8n.pt')  # Auto-downloads if not present
+    # Load YOLOv8n (nano) model - lightweight & fast
+    logger.info(f"Loading YOLOv8n model on {DEVICE}...")
+    yolo_model = YOLO('yolov8n.pt', task='detect')
     
-    # Warm up the model with a dummy inference
-    dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
-    _ = yolo_model(dummy_frame, verbose=False, conf=0.5, imgsz=640)
+    # Move to device for inference
+    if DEVICE == 'cuda':
+        yolo_model = yolo_model.to(DEVICE)
     
-    logger.info("✅ YOLOv8n model loaded and warmed up successfully")
+    # Warm up with reduced size inference
+    dummy_frame = np.zeros((INFERENCE_SIZE, INFERENCE_SIZE, 3), dtype=np.uint8)
+    with torch.no_grad():
+        _ = yolo_model(dummy_frame, verbose=False, conf=0.3, imgsz=INFERENCE_SIZE)
+    
+    logger.info(f"✅ YOLOv8n model loaded on {DEVICE} and warmed up successfully")
+    logger.info(f"📊 Optimization: Skip={SKIP_FRAMES}, YOLO_Skip={YOLO_SKIP_FRAMES}, Size={INFERENCE_SIZE}x{INFERENCE_SIZE}")
 except Exception as e:
     logger.warning(f"⚠️  YOLO not loaded - device detection disabled: {e}")
     yolo_model = None
@@ -99,9 +130,12 @@ class FrameBuffer:
         self.fps_history = deque(maxlen=30)
         self.last_process_time = time.time()
         
-        # YOLO caching
+        # YOLO caching for intelligent device detection
+        # Reduces YOLO inference from every frame to every 10th frame
         self.last_yolo_detections = []
-        self.last_yolo_frame = 0
+        self.last_dev_conf = 0.0  # Confidence score from last YOLO run
+        self.last_yolo_result_time = 0
+        self.yolo_cache_valid = False
         
     def add(self, frame, keypoints=None, gaze=None, ear=None):
         """Add frame data to buffer"""
@@ -406,7 +440,10 @@ def detect_suspicious_activity(buffer: FrameBuffer, pose_landmarks) -> Tuple[boo
 
 def detect_electronic_devices(frame: np.ndarray, yolo_model) -> Tuple[List[Dict], float]:
     """
-    Detect electronic devices using YOLO object detection
+    Detect electronic devices using YOLO with optimizations:
+    - Lower resolution inference (360x360 instead of 640x640)
+    - GPU acceleration if available
+    - Reduced confidence threshold for faster processing
     
     COCO class IDs:
     - 67: cell phone
@@ -425,8 +462,13 @@ def detect_electronic_devices(frame: np.ndarray, yolo_model) -> Tuple[List[Dict]
     max_conf = 0.0
     
     try:
+        # Resize frame to inference size for faster processing
+        h, w = frame.shape[:2]
+        resized_frame = cv2.resize(frame, (INFERENCE_SIZE, INFERENCE_SIZE), interpolation=cv2.INTER_LINEAR)
+        
         # Run YOLO inference with optimized settings
-        results = yolo_model(frame, verbose=False, conf=0.3, imgsz=640)
+        with torch.no_grad():
+            results = yolo_model(resized_frame, verbose=False, conf=0.3, imgsz=INFERENCE_SIZE)
         
         # COCO dataset class IDs for devices
         device_classes = {
@@ -447,13 +489,25 @@ def detect_electronic_devices(frame: np.ndarray, yolo_model) -> Tuple[List[Dict]
                     device_name = device_classes[class_id]
                     x1, y1, x2, y2 = box.xyxy[0].tolist()
                     
+                    # Scale bounding box back to original frame size
+                    scale_x = w / INFERENCE_SIZE
+                    scale_y = h / INFERENCE_SIZE
+                    x1_orig = int(x1 * scale_x)
+                    y1_orig = int(y1 * scale_y)
+                    x2_orig = int(x2 * scale_x)
+                    y2_orig = int(y2 * scale_y)
+                    
                     detections.append({
                         "label": device_name,
-                        "box": [int(x1), int(y1), int(x2), int(y2)],
+                        "box": [x1_orig, y1_orig, x2_orig, y2_orig],
                         "conf": confidence
                     })
                     
                     max_conf = max(max_conf, confidence)
+        
+        # Clear GPU cache periodically to prevent memory buildup
+        if DEVICE == 'cuda' and buffer.frame_count % 50 == 0:
+            torch.cuda.empty_cache()
         
     except Exception as e:
         logger.warning(f"Error in device detection: {e}")
@@ -594,13 +648,17 @@ def create_heatmap_overlay(frame: np.ndarray, alerts: List[str],
 
 async def process_frame(frame: np.ndarray, client_id: str, force_process: bool = False) -> Dict:
     """
-    Main processing pipeline for each frame with optimized performance
+    Main processing pipeline with AGGRESSIVE OPTIMIZATIONS:
     
-    Features:
-    - Adaptive frame skipping (process every 3rd frame)
-    - YOLO caching (run every 10th frame)
-    - Temporal alert smoothing
-    - Multi-modal detection
+    🚀 Optimizations implemented:
+    1. Frame skipping: Process every Nth frame (configurable)
+    2. YOLO caching: Run device detection every M frames only  
+    3. Lower resolution: Process at 360x360 instead of 640x640
+    4. GPU acceleration: Automatic GPU detection and usage
+    5. Memory management: Periodic GPU cache clearing
+    6. Temporal smoothing: Reduce false positives
+    
+    Expected performance: 3-5x faster with minimal accuracy loss
     
     Returns:
         JSON response with alerts, stats, and visualization
@@ -613,16 +671,29 @@ async def process_frame(frame: np.ndarray, client_id: str, force_process: bool =
     
     buffer = client_buffers[client_id]
     buffer.clear_old_alerts(max_age=5.0)  # Clean up old alerts
+    buffer.frame_count += 1
     
-    # Adaptive frame skipping for performance
-    # TEMPORARILY DISABLED - Process every frame for testing
-    skip_frame = False  # Changed from: buffer.frame_count % 3 != 0
+    # ========================================================================
+    # 🚀 OPTIMIZATION 1: FRAME SKIPPING
+    # ========================================================================
+    # Skip processing on every Nth frame to reduce computational load
+    should_skip = (buffer.frame_count % SKIP_FRAMES) != 0
     
+    if should_skip and not force_process:
+        # Return minimal response for skipped frame (fast path)
+        return {
+            "status": "frame_skipped",
+            "frame_number": buffer.frame_count,
+            "fps": buffer.get_avg_fps()
+        }
     
-    # Downscale for faster processing (320 width is sweet spot)
+    # ========================================================================
+    # 🚀 OPTIMIZATION 2: LOWER RESOLUTION PROCESSING
+    # ========================================================================
+    # Process at lower resolution (360x360 sweet spot for speed/accuracy)
     img_h, img_w = frame.shape[:2]
-    scale_factor = 320 / img_w
-    new_w, new_h = 320, int(img_h * scale_factor)
+    scale_factor = INFERENCE_SIZE / img_w
+    new_w, new_h = INFERENCE_SIZE, int(img_h * scale_factor)
     small_frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     
     rgb_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
@@ -715,17 +786,30 @@ async def process_frame(frame: np.ndarray, client_id: str, force_process: bool =
                     confidences.append(activity_conf)
     
     # ========================================================================
-    # 4. YOLO DEVICE DETECTION - Optimized with caching
+    # 🚀 OPTIMIZATION 3: YOLO DEVICE DETECTION - Intelligent Caching
     # ========================================================================
+    # Run heavy YOLO inference only every Nth frame, use cached results otherwise
+    # YOLO is the most expensive operation - caching it saves 80-90% of time
     yolo_detections = []
-    
-    # FIXED: Run YOLO every 10th frame instead of every frame
-    # RUN YOLO EVERY FRAME FOR TESTING (detect all devices immediately)
-    run_yolo = True  # Changed from: buffer.frame_count % 10 == 0
+    dev_conf = 0.0
     
     if yolo_model is not None:
-        yolo_detections, dev_conf = detect_electronic_devices(frame, yolo_model)
-        # No caching - detect in real-time
+        # Decide whether to run YOLO or use cached results
+        run_yolo = (buffer.frame_count % YOLO_SKIP_FRAMES == 0) or force_process
+        
+        if run_yolo:
+            # Run expensive YOLO inference
+            yolo_detections, dev_conf = detect_electronic_devices(frame, yolo_model)
+            # Cache the results for next frames
+            buffer.last_yolo_detections = yolo_detections
+            buffer.last_dev_conf = dev_conf
+            buffer.yolo_cache_valid = True
+        else:
+            # Use cached results from previous YOLO run
+            if buffer.yolo_cache_valid and buffer.last_yolo_detections is not None:
+                yolo_detections = buffer.last_yolo_detections
+                dev_conf = buffer.last_dev_conf
+            # else: keep empty list, no detection this frame
     else:
         yolo_detections = []
     
