@@ -216,15 +216,16 @@ const ProjectDetail = ({ user }) => {
         active: !submissionStatus,
         desc: submissionStatus ? `Status: ${submissionStatus}` : 'Submit your project for mentor review',
       },
-      {
+        {
         label: 'Mentor Approved',
         done: submissionStatus === 'approved',
         active: submissionStatus === 'pending',
+        rejected: submissionStatus === 'rejected',
         desc:
           submissionStatus === 'approved'
             ? 'Project approved ✓'
             : submissionStatus === 'rejected'
-            ? 'Changes requested — resubmit'
+            ? 'Rejected — fix and resubmit'
             : 'Waiting for mentor review',
       },
       {
@@ -250,19 +251,20 @@ const ProjectDetail = ({ user }) => {
             className={`flex items-center gap-3 p-2.5 rounded-lg border ${
               step.done
                 ? 'bg-green-50 border-green-200'
-                : step.active
-                ? 'bg-blue-50 border-blue-200'
-                : 'bg-[rgb(248,250,252)] border-[rgb(226,232,240)]'
+                : step.rejected
+                ? 'bg-red-50 border-red-200'
+           : step.active
+    ? 'bg-blue-50 border-blue-200'
+    : 'bg-[rgb(248,250,252)] border-[rgb(226,232,240)]'
             }`}
           >
             <div
               className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
-                step.done
-                  ? 'bg-green-500'
-                  : step.active
-                  ? 'bg-[rgb(37,99,235)]'
-                  : 'bg-[rgb(226,232,240)]'
-              }`}
+                step.done ? 'bg-green-500'
+    : step.rejected ? 'bg-red-500'
+    : step.active ? 'bg-[rgb(37,99,235)]'
+    : 'bg-[rgb(226,232,240)]'
+}`}
             >
               {step.done ? (
                 <CheckCircle className="w-3.5 h-3.5 text-white" />
@@ -287,13 +289,14 @@ const ProjectDetail = ({ user }) => {
             <span
               className={`text-xs font-bold px-2 py-0.5 rounded-full shrink-0 ${
                 step.done
-                  ? 'bg-green-100 text-green-700'
-                  : step.active
-                  ? 'bg-blue-100 text-[rgb(37,99,235)]'
-                  : 'bg-[rgb(241,245,249)] text-[rgb(148,163,184)]'
-              }`}
-            >
-              {step.done ? 'Done' : step.active ? 'Active' : 'Pending'}
+    ? 'bg-green-100 text-green-700'
+    : step.rejected
+    ? 'bg-red-100 text-red-700'
+    : step.active
+    ? 'bg-blue-100 text-[rgb(37,99,235)]'
+    : 'bg-[rgb(241,245,249)] text-[rgb(148,163,184)]'
+}`}>
+{step.done ? 'Done' : step.rejected ? 'Rejected' : step.active ? 'Active' : 'Pending'}
             </span>
           </div>
         ))}

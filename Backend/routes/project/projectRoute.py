@@ -15,33 +15,26 @@ from utils.agent_nodes.update_knowledge_node import update_user_knowledge
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
 # AUTHORIZATION HELPER
-# ============================================================================
 def get_authenticated_user(request: Request) -> str:
-    """
-    Extract user ID from session cookie.
-    Raises HTTPException if user is not authenticated.
-    Returns user_id/email from session.
-    """
     try:
         session = getattr(request.state, 'session', None)
         if not session:
-            logger.warning("❌ No session found on request")
+            logger.warning("No session found on request")
             raise HTTPException(status_code=401, detail="Not authenticated")
         
         # Session stores email as identifier
         email = session.get("email")
         if not email:
-            logger.warning("❌ No email in session")
+            logger.warning("No email in session")
             raise HTTPException(status_code=401, detail="Invalid session")
         
-        logger.info(f"✅ Authenticated user: {email}")
+        logger.info(f"Authenticated user: {email}")
         return email
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Session retrieval error: {e}")
+        logger.error(f"Session retrieval error: {e}")
         raise HTTPException(status_code=401, detail="Authentication error")
 
 def get_user_id_from_email(email: str) -> str:
@@ -64,10 +57,8 @@ def get_user_id_from_email(email: str) -> str:
         # Fallback: use email as user_id if lookup fails
         return email
 
-# ── Load .env FIRST before anything reads environment variables ──────────────
 load_dotenv()
 
-# ── Groq init (free, fast, no billing required) ──────────────────────────────
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if GROQ_API_KEY:
     logger.info("✅ Groq API key loaded successfully")
@@ -84,11 +75,7 @@ submissions_collection      = db["project_submissions"]
 certificates_collection     = db["certificates"]
 users_collection = db["users"]
 
-
-
-# ============================================================================
 # MODELS
-# ============================================================================
 class QuizSubmission(BaseModel):
     quiz_id: str
     user_id: str
@@ -131,59 +118,65 @@ class MentorActionRequest(BaseModel):
     reason: Optional[str] = None
 
 
-# ============================================================================
 # CERTIFICATE HELPER
-# ============================================================================
 def maybe_issue_certificate(user_id: str, project_id: str):
     try:
         logger.info(f"🔍 Certificate check — user: {user_id}, project: {project_id}")
-        logger.info(f"   user_id type: {type(user_id)}, value: '{user_id}'")
-        logger.info(f"   project_id type: {type(project_id)}, value: '{project_id}'")
 
-        # Check if submission is approved
+        # ── CONDITION 1: Submission must be approved ──────────────────────────
         submission = submissions_collection.find_one({
             "user_id": user_id, "project_id": project_id, "status": "approved"
         })
-        logger.info(f"  ↳ Submission approved: {submission is not None}")
-        if submission:
-            logger.info(f"     Submission status: {submission.get('status')}")
-        else:
-            logger.warning(f"     ⚠️ No approved submission found for {user_id}/{project_id}")
+        submission_approved = submission is not None
+        logger.info(f"  ↳ Submission approved: {submission_approved}")
 
-        # Check if quiz is completed ✅
+        # ── CONDITION 2: Quiz must be completed ───────────────────────────────
         quiz = project_quizzes_collection.find_one({
             "user_id": user_id, "project_id": project_id, "is_completed": True
         })
-        logger.info(f"  ↳ Quiz completed: {quiz is not None}")
-        if quiz:
-            logger.info(f"     Quiz found: _id={quiz.get('_id')}, score={quiz.get('score')}")
-        if not quiz:
-            logger.warning(f"     ⚠️ No completed quiz found")
+        quiz_completed = quiz is not None
+        logger.info(f"  ↳ Quiz completed: {quiz_completed}")
+
+        # ── STRICT GATE: Both must be true ────────────────────────────────────
+        if not submission_approved and not quiz_completed:
+            logger.warning(f"  ⛔ BLOCKED — submission not approved AND quiz not completed")
             return None
 
-        # Calculate score
+        if not submission_approved:
+            logger.warning(f"  ⛔ BLOCKED — quiz passed but submission not yet approved by mentor")
+            return None
+
+        if not quiz_completed:
+            logger.warning(f"  ⛔ BLOCKED — submission approved but quiz not yet completed")
+            return None
+
+        # ── Both conditions met — now validate quiz score ─────────────────────
         total      = len(quiz.get("questions", []))
         score      = quiz.get("score", 0)
         percentage = round((score / total) * 100) if total > 0 else 0
         logger.info(f"  ↳ Quiz score: {score}/{total} = {percentage}%")
-        
+
         if percentage < 70:
-            logger.warning(f"     ⚠️ Score {percentage}% is below 70% threshold")
+            logger.warning(f"  ⛔ BLOCKED — score {percentage}% is below 70% threshold")
             return None
 
-        # Check if certificate already exists
-        existing = certificates_collection.find_one({"user_id": user_id, "project_id": project_id})
+        logger.info(f"  ✅ Both conditions met — proceeding to issue certificate")
+
+        # ── Already issued? Return existing ──────────────────────────────────
+        existing = certificates_collection.find_one({
+            "user_id": user_id, "project_id": project_id
+        })
         if existing:
-            logger.info(f"  ↳ Certificate already exists: {existing.get('_id')}")
+            logger.info(f"  ↳ Certificate already exists: {existing.get('certificate_id')}")
             return serialize_doc(existing)
 
-        # Get project details
+        # ── Fetch project details ─────────────────────────────────────────────
         project = None
         try:
             project = user_projects_collection.find_one({"_id": ObjectId(project_id)})
         except Exception as e:
             logger.debug(f"Failed to find in user_projects: {e}")
-        
+
         if not project:
             try:
                 project = project_collection.find_one({"_id": ObjectId(project_id)})
@@ -191,17 +184,17 @@ def maybe_issue_certificate(user_id: str, project_id: str):
                 logger.debug(f"Failed to find in project_collection: {e}")
 
         if not project:
-            logger.warning(f"     ⚠️ Project not found for {project_id}")
+            logger.warning(f"  ⚠️ Project not found for {project_id} — using defaults")
             project_title = "Project"
-            technologies = []
-            category = ""
+            technologies  = []
+            category      = ""
         else:
-            project_title = (project.get("title") or project.get("project_title", "Project"))
+            project_title = project.get("title") or project.get("project_title", "Project")
             technologies  = project.get("technologies", [])
             category      = project.get("category", "")
-            logger.info(f"     Project: {project_title}")
+            logger.info(f"  ↳ Project: {project_title}")
 
-        # Issue certificate
+        # ── Issue certificate ─────────────────────────────────────────────────
         cert_doc = {
             "user_id":        user_id,
             "project_id":     project_id,
@@ -212,33 +205,23 @@ def maybe_issue_certificate(user_id: str, project_id: str):
             "issued_at":      datetime.now(timezone.utc),
             "certificate_id": f"IMMERSIA-{user_id[-6:].upper()}-{project_id[-6:].upper()}",
         }
-        logger.info(f"  ↳ About to insert certificate: {cert_doc}")
+
         result = certificates_collection.insert_one(cert_doc)
         cert_doc["_id"] = result.inserted_id
-        logger.info(f"✅ Certificate ISSUED: _id={result.inserted_id}, {cert_doc['certificate_id']} (score: {percentage}%)")
-        
-        # Verify it was inserted
+        logger.info(f"✅ Certificate ISSUED: {cert_doc['certificate_id']} (score: {percentage}%)")
+
         verify = certificates_collection.find_one({"_id": result.inserted_id})
         if verify:
             logger.info(f"✅ Certificate VERIFIED in DB: {verify['_id']}")
         else:
-            logger.error(f"❌ Certificate NOT FOUND after insert: {result.inserted_id}")
-        
+            logger.error(f"❌ Certificate NOT FOUND after insert — DB write may have failed")
+
         return serialize_doc(cert_doc)
 
     except Exception as e:
         logger.error(f"❌ Certificate issuance error: {e}", exc_info=True)
         return None
 
-
-# ============================================================================
-# HUGGINGFACE HELPER - free inference API with model fallback chain
-# ============================================================================
-
-# ============================================================================
-# GROQ HELPER - free inference API, no billing required
-# Get your free key at: console.groq.com
-# ============================================================================
 # Models in fallback order - all free on Groq
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",    # primary   - best quality, 70B
@@ -259,7 +242,6 @@ def call_gemini_json(prompt_text: str) -> Optional[str]:
         logger.error("GROQ_API_KEY not set - cannot call Groq API")
         return None
 
-    # Lazy import groq SDK - install if missing
     try:
         from groq import Groq
     except ImportError:
@@ -363,7 +345,7 @@ def _extract_json_object(text: str) -> Optional[str]:
             depth -= 1
             if depth == 0:
                 return text[:i + 1]
-    return None  # unbalanced braces = truncated response
+    return None  
 
 
 # ============================================================================
@@ -397,7 +379,6 @@ async def generate_project(request: GenerateProjectRequest):
     skills_str = ", ".join(request.skills)
     domain     = random.choice(APP_DOMAINS)
 
-    # ── Shorter, tighter prompt — reduces truncation risk ───────────────────
     master_prompt = f"""You are a senior software engineer. Generate a specific, named portfolio project.
 
 Student skills: {skills_str}
@@ -1377,17 +1358,6 @@ async def get_user_project(project_id: str):
         logger.error(f"Error fetching user project: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
     
-# ============================================================================
-# MENTOR APPROVE  —  drop-in replacement for the existing approve_submission
-# ============================================================================
-# Add this import at the top of projectRoute.py alongside the other imports:
-#
-#   from utils.agent_nodes.update_knowledge_node import update_user_knowledge
-#
-# Also add this collection alongside the others at the top:
-#
-#   users_collection = db["users"]
-# ============================================================================
 
 @router.post("/api/submissions/{submission_id}/approve")
 async def approve_submission(submission_id: str, body: MentorActionRequest):

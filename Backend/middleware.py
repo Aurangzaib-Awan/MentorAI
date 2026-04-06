@@ -11,24 +11,18 @@ db = client["immersia"]
 sessions_collection = db["sessions"]
 session_manager = SessionManager(sessions_collection)
 
-# ============================================================================
 # Routes that are FULLY PUBLIC — no session, no CSRF required
-# ============================================================================
+
 PUBLIC_PREFIXES = (
     "/login",
     "/signup",
     "/auth/google",
-    "/session/csrf",          # ✅ FIX 1: CSRF endpoint must be public (no session yet)
+    "/session/csrf",          
 )
 
-# ============================================================================
-# Routes that require a SESSION but skip CSRF header check
-# (These are called right after login when CSRF cookie may not be read yet,
-#  or are internal AI generation calls that are session-less by design)
-# ============================================================================
 CSRF_EXEMPT_PREFIXES = (
-    "/api/generate-project",  # Gemini project generation
-    "/api/generate-quiz",     # Gemini quiz generation
+    "/api/generate-project", 
+    "/api/generate-quiz",    
     "/api/quiz/submit",       # Quiz submission
     "/api/user-projects",     # Create/fetch user projects
     "/api/projects/",         # Project operations

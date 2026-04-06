@@ -12,7 +12,7 @@ import { Link } from "react-router-dom";
 function Signup({ setUser }) {
   const navigate = useNavigate();
   const location = useLocation();
-  const from = location.state?.from?.pathname || "/projects";
+  const from = location.state?.from?.pathname || "/skill";
   
   // Debug: Log the routing state
   console.log('Signup - location.state:', location.state);
@@ -114,16 +114,15 @@ function Signup({ setUser }) {
         
         setSuccessMessage("Account created successfully! Redirecting...");
         
-        // Navigate to intended page BEFORE React batches the setState
-        // This prevents GuestOnlyRoute from intercepting
-        navigate(from, { replace: true });
+        // Update app state FIRST (synchronously) before navigation
+        // This ensures ProtectedRoute sees the user when evaluating access
+        if (setUser) {
+          setUser(cachedUser);
+          console.log('Signup - Set user state BEFORE navigation');
+        }
         
-        // Update app state AFTER navigation
-        // This ensures routes re-evaluate with user available from sessionStorage
-        setTimeout(() => {
-          console.log('Signup - Setting user state after navigation');
-          if (setUser) setUser(cachedUser);
-        }, 0);
+        // Navigate to intended page AFTER state is updated
+        navigate(from, { replace: true });
       } else {
         setServerError("Signup failed. Please try again.");
       }

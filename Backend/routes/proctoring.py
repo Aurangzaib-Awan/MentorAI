@@ -1,431 +1,3 @@
-"""
-AI Proctoring Route - WebSocket endpoint for real-time proctoring
-Uses OpenCV Haar Cascades for face/eye detection (Windows-compatible, no protobuf issues)
-Integrates YOLOv8 for device detection
-
-REPLACEMENT VERSION: Mediapipe removed, using OpenCV instead
-"""
-"""
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-import cv2
-import numpy as np
-import base64
-import json
-from collections import deque
-from typing import Dict, List, Tuple, Optional
-import logging
-import os
-import time
-
-# Configure logger
-logger = logging.getLogger(__name__)
-DEBUG = os.getenv("DEBUG", "false").lower() == "true"
-if DEBUG:
-    logger.setLevel(logging.DEBUG)
-else:
-    logger.setLevel(logging.INFO)
-
-router = APIRouter()
-
-# ============================================================================
-# CASCADE CLASSIFIERS INITIALIZATION (OpenCV built-in, no Windows issues)
-# ============================================================================
-try:
-    face_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-    )
-    eye_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + 'haarcascade_eye.xml'
-    )
-    logger.info("✅ Cascade classifiers loaded successfully")
-except Exception as e:
-    logger.error(f"Failed to load cascade classifiers: {e}")
-    face_cascade = None
-    eye_cascade = None
-
-# ============================================================================
-# YOLO MODEL INITIALIZATION (with PyTorch 2.6+ compatibility)
-# ============================================================================
-yolo_model = None
-try:
-    import torch
-    from ultralytics import YOLO
-    
-    # Fix for PyTorch 2.6+: Add safe globals if available
-    if hasattr(torch.serialization, 'add_safe_globals'):
-        from ultralytics.nn.tasks import DetectionModel
-        torch.serialization.add_safe_globals([DetectionModel])
-    
-    # Load YOLOv8n (nano) model for object detection
-    yolo_model = YOLO('yolov8n.pt')
-    
-    # Warm up the model with a dummy inference
-    dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
-    _ = yolo_model(dummy_frame, verbose=False, conf=0.5, imgsz=640)
-    
-    logger.info("✅ YOLOv8n model loaded and warmed up successfully")
-except Exception as e:
-    logger.warning(f"⚠️  YOLO not loaded - device detection disabled: {e}")
-    yolo_model = None
-
-# ============================================================================
-# TEMPORAL BUFFER FOR TRACKING & SMOOTHING
-# ============================================================================
-class FrameBuffer:
-    def __init__(self, maxlen=30):
-        self.frames = deque(maxlen=maxlen)
-        self.face_detections = deque(maxlen=maxlen)
-        self.eye_detections = deque(maxlen=maxlen)
-        self.alert_history = deque(maxlen=15)
-        self.frame_count = 0
-        self.fps_history = deque(maxlen=30)
-        self.last_process_time = time.time()
-        self.last_yolo_detections = []
-        self.last_yolo_frame = 0
-        
-    def add(self, frame, face_detected=False, eyes_detected=False):
-        self.frames.append(frame)
-        self.face_detections.append(face_detected)
-        self.eye_detections.append(eyes_detected)
-        self.frame_count += 1
-    
-    def add_alert(self, alert_type: str):
-        self.alert_history.append({
-            'type': alert_type,
-            'timestamp': time.time()
-        })
-    
-    def should_trigger_alert(self, alert_type: str, required_count: int = 3, time_window: float = 1.0) -> bool:
-        if len(self.alert_history) < required_count:
-            return False
-        
-        current_time = time.time()
-        recent_alerts = [
-            a for a in self.alert_history 
-            if a['type'] == alert_type and (current_time - a['timestamp']) <= time_window
-        ]
-        
-        return len(recent_alerts) >= required_count
-    
-    def update_fps(self) -> float:
-        current_time = time.time()
-        fps = 1.0 / (current_time - self.last_process_time + 1e-6)
-        self.fps_history.append(fps)
-        self.last_process_time = current_time
-        return fps
-    
-    def get_avg_fps(self) -> float:
-        if not self.fps_history:
-            return 0.0
-        return sum(self.fps_history) / len(self.fps_history)
-
-# Store buffers per client
-client_buffers: Dict[str, FrameBuffer] = {}
-
-# ============================================================================
-# FACE & EYE DETECTION
-# ============================================================================
-def detect_faces_and_eyes(frame: np.ndarray) -> Tuple[int, bool, float]:
-
-    if face_cascade is None or eye_cascade is None:
-        return 0, False, 0.0
-    
-    try:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(
-            gray, 
-            scaleFactor=1.1, 
-            minNeighbors=4, 
-            minSize=(80, 80)
-        )
-        
-        num_faces = len(faces)
-        eyes_found = False
-        confidence = 0.7 if num_faces > 0 else 0.0
-        
-        if num_faces > 0:
-            # Check eyes in the largest face
-            largest_face = max(faces, key=lambda f: f[2] * f[3])
-            (x, y, w, h) = largest_face
-            roi_gray = gray[y:y+h, x:x+w]
-            
-            eyes = eye_cascade.detectMultiScale(
-                roi_gray, 
-                scaleFactor=1.1, 
-                minNeighbors=4, 
-                minSize=(20, 20)
-            )
-            eyes_found = len(eyes) >= 1
-            confidence = 0.8 if eyes_found else 0.6
-        
-        return num_faces, eyes_found, confidence
-        
-    except Exception as e:
-        logger.warning(f"Error in face/eye detection: {e}")
-        return 0, False, 0.0
-
-# ============================================================================
-# DEVICE DETECTION (YOLO)
-# ============================================================================
-def detect_electronic_devices(frame: np.ndarray, yolo_model) -> Tuple[List[Dict], float]:
-    if yolo_model is None:
-        return [], 0.0
-    
-    detections = []
-    max_conf = 0.0
-    
-    try:
-        results = yolo_model(frame, verbose=False, conf=0.3, imgsz=640)
-        
-        # COCO dataset class IDs for devices
-        device_classes = {
-            67: 'cell phone',
-            63: 'laptop',
-            62: 'monitor',
-            66: 'keyboard',
-            64: 'mouse'
-        }
-        
-        for result in results:
-            boxes = result.boxes
-            for box in boxes:
-                class_id = int(box.cls[0])
-                confidence = float(box.conf[0])
-                
-                if class_id in device_classes:
-                    device_name = device_classes[class_id]
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    
-                    detections.append({
-                        "label": device_name,
-                        "box": [int(x1), int(y1), int(x2), int(y2)],
-                        "conf": confidence
-                    })
-                    
-                    max_conf = max(max_conf, confidence)
-        
-    except Exception as e:
-        logger.warning(f"Error in device detection: {e}")
-        return [], 0.0
-    
-    return detections, max_conf
-
-# ============================================================================
-# BEHAVIOR STATUS
-# ============================================================================
-def get_behavior_status(num_faces: int, eyes_found: bool) -> str:
-    if num_faces == 0:
-        return "no_face"
-    elif num_faces > 1:
-        return "multiple_people"
-    elif not eyes_found:
-        return "looking_away"
-    else:
-        return "normal"
-
-# ============================================================================
-# ALERT GENERATION
-# ============================================================================
-def generate_alerts(num_faces: int, eyes_found: bool, devices_detected: List[str]) -> Tuple[List[str], float]:
-
-    alerts = []
-    confidences = []
-    max_confidence = 1.0
-    
-    # Face presence check
-    if num_faces == 0:
-        alerts.append("no_face")
-        confidences.append(0.95)
-        max_confidence = 0.95
-    
-    # Multiple faces check
-    if num_faces > 1:
-        alerts.append("multiple_people")
-        confidences.append(0.80)
-        max_confidence = max(max_confidence, 0.80)
-    
-    # Gaze/eye tracking
-    if num_faces > 0 and not eyes_found:
-        alerts.append("looking_away")
-        confidences.append(0.70)
-        max_confidence = max(max_confidence, 0.70)
-        logger.debug("Looking away detected")
-    
-    # Device detection
-    for device in devices_detected:
-        alerts.append(f"device_detected_{device}")
-        confidences.append(0.75)
-        max_confidence = max(max_confidence, 0.75)
-    
-    if alerts:
-        unique_alerts = list(set(alerts))
-        final_confidence = max(confidences) if confidences else 1.0
-        return unique_alerts, final_confidence
-    
-    return [], 0.0
-
-# ============================================================================
-# HEATMAP OVERLAY
-# ============================================================================
-def create_heatmap_overlay(frame: np.ndarray, alerts: List[str], behavior_status: str, fps: float) -> np.ndarray:
-    viz_frame = frame.copy()
-    h, w = viz_frame.shape[:2]
-    
-    # Add status text
-    status_color = (0, 255, 0) if behavior_status == "normal" else (0, 0, 255)
-    cv2.putText(viz_frame, f"Status: {behavior_status}", (10, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
-    
-    # Add alerts
-    if alerts:
-        alert_text = " | ".join(alerts[:3])  # Show first 3 alerts
-        cv2.putText(viz_frame, f"Alerts: {alert_text}", (10, 70), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-    
-    # Add FPS
-    cv2.putText(viz_frame, f"FPS: {fps:.1f}", (w-150, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    
-    return viz_frame
-
-# ============================================================================
-# FRAME PROCESSING FUNCTION
-# ============================================================================
-async def process_frame(frame: np.ndarray, client_id: str) -> dict:
-    start_time = time.time()
-    
-    # Get or create buffer
-    if client_id not in client_buffers:
-        client_buffers[client_id] = FrameBuffer()
-    
-    buffer = client_buffers[client_id]
-    
-    # 1. Face and eye detection
-    num_faces, eyes_found, face_conf = detect_faces_and_eyes(frame)
-    
-    # 2. Device detection (YOLO every 5 frames)
-    run_yolo = buffer.frame_count % 5 == 0
-    devices_detected = []
-    device_conf = 0.0
-    
-    if run_yolo:
-        devices, device_conf = detect_electronic_devices(frame, yolo_model)
-        devices_detected = [d["label"] for d in devices]
-    
-    # 3. Generate behavior status
-    behavior_status = get_behavior_status(num_faces, eyes_found)
-    
-    # 4. Generate alerts
-    alerts, max_conf = generate_alerts(num_faces, eyes_found, devices_detected)
-    
-    # 5. Create visualization
-    viz_frame = create_heatmap_overlay(frame, alerts, behavior_status, buffer.get_avg_fps())
-    
-    # Encode to base64
-    _, buffer_img = cv2.imencode('.jpg', viz_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    viz_base64 = base64.b64encode(buffer_img).decode('utf-8')
-    
-    # 6. Calculate metrics
-    processing_time = (time.time() - start_time) * 1000
-    current_fps = buffer.update_fps()
-    
-    # Build response
-    response = {
-        "alert": " AND ".join(set(alerts)) if alerts else "none",
-        "conf": round(max_conf, 2),
-        "viz": viz_base64,
-        "behavior_status": behavior_status,
-        "devices_detected": list(set(devices_detected)),
-        "details": {
-            "num_faces": num_faces,
-            "eyes_found": eyes_found,
-            "face_confidence": round(face_conf, 2),
-            "processing_time_ms": round(processing_time, 2),
-            "fps": round(current_fps, 1),
-            "avg_fps": round(buffer.get_avg_fps(), 1),
-            "frame_count": buffer.frame_count,
-        },
-        "timestamp": time.time()
-    }
-    
-    if DEBUG:
-        logger.debug(f"\nFrame #{buffer.frame_count}")
-        logger.debug(f"Faces: {num_faces}, Eyes: {eyes_found}")
-        logger.debug(f"Devices: {devices_detected}")
-        logger.debug(f"Alerts: {alerts}")
-        logger.debug(f"Behavior: {behavior_status}\n")
-    
-    return response
-
-# ============================================================================
-# WEBSOCKET ENDPOINT
-# ============================================================================
-@router.websocket("/ws/proctor")
-async def websocket_endpoint(websocket: WebSocket):
-  
-    await websocket.accept()
-    client_id = str(id(websocket))
-    
-    logger.info(f"✅ Client {client_id} connected to proctoring WebSocket")
-    
-    try:
-        while True:
-            # Receive frame data
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            # Extract frame
-            frame_data = message.get("frame", "")
-            if not frame_data:
-                await websocket.send_json({"error": "No frame data received"})
-                continue
-            
-            # Remove data URL prefix if present
-            if "," in frame_data:
-                frame_data = frame_data.split(",")[1]
-            
-            # Decode base64 to numpy array
-            try:
-                img_bytes = base64.b64decode(frame_data)
-                nparr = np.frombuffer(img_bytes, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-                if frame is None:
-                    await websocket.send_json({"error": "Failed to decode frame"})
-                    continue
-            except Exception as e:
-                await websocket.send_json({"error": f"Frame decode error: {str(e)}"})
-                continue
-            
-            # Process frame
-            result = await process_frame(frame, client_id)
-            
-            # Send result
-            await websocket.send_json(result)
-            
-    except WebSocketDisconnect:
-        logger.info(f"❌ Client {client_id} disconnected")
-        if client_id in client_buffers:
-            del client_buffers[client_id]
-    except Exception as e:
-        logger.error(f"⚠️  Error in WebSocket handler: {e}")
-        try:
-            await websocket.send_json({"error": str(e)})
-        except:
-            pass
-        finally:
-            if client_id in client_buffers:
-                del client_buffers[client_id]
-
-"""
-
-"""
-AI Proctoring Route - WebSocket endpoint for real-time proctoring
-Integrates MediaPipe FaceMesh, YOLOv8, and OpenCV for multi-modal cheat detection
-
-COMPLETE PRODUCTION VERSION with all optimizations and fixes
-"""
-
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import cv2
 import numpy as np
@@ -466,9 +38,6 @@ RIGHT_EYE_CORNER = 263
 LEFT_MOUTH_CORNER = 61
 RIGHT_MOUTH_CORNER = 291
 
-# ============================================================================
-# MEDIAPIPE MODEL INITIALIZATION
-# ============================================================================
 mp_face_mesh = mp.solutions.face_mesh
 mp_face_detection = mp.solutions.face_detection
 mp_pose = mp.solutions.pose
@@ -493,9 +62,6 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.6
 )
 
-# ============================================================================
-# YOLO MODEL INITIALIZATION (with PyTorch 2.6+ compatibility)
-# ============================================================================
 yolo_model = None
 try:
     import torch
@@ -518,9 +84,7 @@ except Exception as e:
     logger.warning(f"⚠️  YOLO not loaded - device detection disabled: {e}")
     yolo_model = None
 
-# ============================================================================
 # TEMPORAL BUFFER FOR TRACKING & SMOOTHING
-# ============================================================================
 class FrameBuffer:
     """
     Tracks temporal data across frames for smoothing and alert persistence
@@ -558,17 +122,7 @@ class FrameBuffer:
         })
     
     def should_trigger_alert(self, alert_type: str, required_count: int = 3, time_window: float = 1.0) -> bool:
-        """
-        Check if alert should trigger based on recent history
-        
-        Args:
-            alert_type: Type of alert to check
-            required_count: Number of occurrences needed
-            time_window: Time window in seconds (default 1.0s = ~5 frames at 5 FPS)
-        
-        Returns:
-            True if alert threshold is met
-        """
+        """Determine if an alert should be triggered based on recent history"""
         if len(self.alert_history) < required_count:
             return False
         
@@ -605,9 +159,7 @@ class FrameBuffer:
 # Store buffers per client
 client_buffers: Dict[str, FrameBuffer] = {}
 
-# ============================================================================
 # EYE TRACKING & GAZE DETECTION
-# ============================================================================
 def calculate_ear(eye_landmarks: np.ndarray) -> float:
     """
     Calculate Eye Aspect Ratio (EAR) for blink detection
@@ -688,9 +240,8 @@ def draw_iris_points(frame: np.ndarray, face_landmarks, img_w: int, img_h: int):
     cv2.circle(frame, (int(left_iris.x * img_w), int(left_iris.y * img_h)), 3, (0, 255, 255), -1)
     cv2.circle(frame, (int(right_iris.x * img_w), int(right_iris.y * img_h)), 3, (0, 255, 255), -1)
 
-# ============================================================================
 # HEAD POSE ESTIMATION
-# ============================================================================
+
 def calculate_head_pose(face_landmarks, img_w: int, img_h: int) -> Tuple[float, float, float]:
     """
     Calculate head pose (pitch, yaw, roll) using solvePnP
@@ -774,9 +325,8 @@ def draw_head_pose_axis(frame: np.ndarray, face_landmarks, img_w: int, img_h: in
     cv2.line(frame, nose_2d, x_end, (0, 0, 255), 3)  # Red (X)
     cv2.line(frame, nose_2d, y_end, (0, 255, 0), 3)  # Green (Y)
 
-# ============================================================================
 # POSE DETECTION & SUSPICIOUS ACTIVITY
-# ============================================================================
+
 def detect_suspicious_activity(buffer: FrameBuffer, pose_landmarks) -> Tuple[bool, str, float, Dict]:
     """
     Detect suspicious activity using pose analysis:
@@ -852,9 +402,8 @@ def detect_suspicious_activity(buffer: FrameBuffer, pose_landmarks) -> Tuple[boo
     
     return False, "", 0.0, metrics
 
-# ============================================================================
 # YOLO DEVICE DETECTION
-# ============================================================================
+
 def detect_electronic_devices(frame: np.ndarray, yolo_model) -> Tuple[List[Dict], float]:
     """
     Detect electronic devices using YOLO object detection
@@ -907,14 +456,13 @@ def detect_electronic_devices(frame: np.ndarray, yolo_model) -> Tuple[List[Dict]
                     max_conf = max(max_conf, confidence)
         
     except Exception as e:
-        logger.warning(f"⚠️  Error in device detection: {e}")
+        logger.warning(f"Error in device detection: {e}")
         return [], 0.0
     
     return detections, max_conf
 
-# ============================================================================
 # BEHAVIOR STATUS CLASSIFICATION
-# ============================================================================
+
 def get_human_behavior_status(gaze_h: float, gaze_v: float, pose_landmarks, 
                                num_faces: int, ear: float) -> str:
     """
@@ -1042,9 +590,8 @@ def create_heatmap_overlay(frame: np.ndarray, alerts: List[str],
     
     return overlay
 
-# ============================================================================
 # MAIN PROCESSING PIPELINE
-# ============================================================================
+
 async def process_frame(frame: np.ndarray, client_id: str, force_process: bool = False) -> Dict:
     """
     Main processing pipeline for each frame with optimized performance
@@ -1071,27 +618,6 @@ async def process_frame(frame: np.ndarray, client_id: str, force_process: bool =
     # TEMPORARILY DISABLED - Process every frame for testing
     skip_frame = False  # Changed from: buffer.frame_count % 3 != 0
     
-    # if skip_frame and not has_recent_alerts:
-    #     buffer.frame_count += 1
-    #     return { ... }
-    #     buffer.frame_count += 1
-    #     return {
-    #         "alert": "none",
-    #         "conf": 1.0,
-    #         "viz": "",
-    #         "behavior_status": "Focused on screen",
-    #         "devices_detected": [],
-    #         "details": {
-    #             "num_faces": 1,
-    #             "gaze_horizontal": 0.0,
-    #             "gaze_vertical": 0.0,
-    #             "ear": 0.3,
-    #             "processing_time_ms": 0.0,
-    #             "fps": buffer.get_avg_fps(),
-    #             "skipped": True
-    #         },
-    #         "timestamp": time.time()
-    #     }
     
     # Downscale for faster processing (320 width is sweet spot)
     img_h, img_w = frame.shape[:2]
@@ -1106,9 +632,8 @@ async def process_frame(frame: np.ndarray, client_id: str, force_process: bool =
     confidences = []
     devices_detected = []
     
-    # ========================================================================
     # 1. FACE DETECTION - Multiple face check
-    # ========================================================================
+
     face_det_results = face_detection.process(rgb_frame)
     num_faces = 0
     face_conf = 0.0
@@ -1132,9 +657,8 @@ async def process_frame(frame: np.ndarray, client_id: str, force_process: bool =
             alerts.append("no_face_detected")
             confidences.append(0.90)
     
-    # ========================================================================
     # 2. FACE MESH - Gaze tracking and eye analysis
-    # ========================================================================
+    
     face_mesh_results = face_mesh.process(rgb_frame)
     gaze_h, gaze_v = 0.0, 0.0
     avg_ear = 0.3
@@ -1168,9 +692,8 @@ async def process_frame(frame: np.ndarray, client_id: str, force_process: bool =
         # Head pose estimation (using original frame dimensions)
         pitch, yaw, roll = calculate_head_pose(face_landmarks, img_w, img_h)
     
-    # ========================================================================
     # 3. POSE DETECTION - Suspicious activity
-    # ========================================================================
+
     pose_results = pose.process(rgb_frame)
     pose_metrics = {}
     
@@ -1323,9 +846,8 @@ async def process_frame(frame: np.ndarray, client_id: str, force_process: bool =
     
     return response
 
-# ============================================================================
 # WEBSOCKET ENDPOINT
-# ============================================================================
+
 @router.websocket("/ws/proctor")
 async def websocket_endpoint(websocket: WebSocket):
     """

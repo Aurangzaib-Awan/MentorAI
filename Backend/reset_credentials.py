@@ -1,18 +1,4 @@
 #!/usr/bin/env python3
-"""
-Script to reset/seed admin, hr, and mentor credentials.
-Run this once to create/update the accounts in MongoDB.
-
-Passwords are loaded from environment variables:
-  - ADMIN_PASSWORD
-  - HR_PASSWORD
-  - MENTOR_PASSWORD
-
-Set these in Backend/.env file for local development.
-
-Usage:
-    python reset_credentials.py
-"""
 
 from seed_accounts import ensure_seed_accounts
 import os
