@@ -1,7 +1,7 @@
 // pages/projects/ProjectSubmission.jsx
 import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Upload, FileText, Link, Github, CheckCircle, AlertCircle, X, ArrowLeft } from 'lucide-react';
+import { FileText, Link, Github, CheckCircle, AlertCircle, ArrowLeft } from 'lucide-react';
 import { projectAPI } from '../../services/api.js';
 
 const ProjectSubmission = ({ user }) => {
@@ -9,50 +9,33 @@ const ProjectSubmission = ({ user }) => {
   const navigate = useNavigate();
 
   const [formData, setFormData] = useState({
-    description: '',
-    githubUrl: '',
-    liveDemoUrl: '',
-    files: [],
-    challenges: '',
-    learnings: ''
+    description:  '',
+    githubUrl:    '',
+    liveDemoUrl:  '',
+    challenges:   '',
+    learnings:    ''
   });
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSubmitting, setIsSubmitting]     = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError]                   = useState('');
   const [curatedProjectId, setCuratedProjectId] = useState(null);
 
-  const handleFileChange = (e) => {
-    const selected = Array.from(e.target.files);
-    setFormData(prev => ({ ...prev, files: [...prev.files, ...selected] }));
-  };
-
-  const removeFile = (index) => {
-    setFormData(prev => ({ ...prev, files: prev.files.filter((_, i) => i !== index) }));
-  };
-
-  // ── Find matching curated project on mount for redirect ─────────────────────
+  // Find matching curated project for redirect after submit
   React.useEffect(() => {
     const findCuratedProject = async () => {
       try {
-        // Fetch user project to get title
-        const userProjData = await projectAPI.getUserProject(projectId);
+        const userProjData  = await projectAPI.getUserProject(projectId);
         if (!userProjData) return;
-
-        // Fetch curated projects and find matching one
-        const projectsRes = await projectAPI.getProjects();
-        const projectsList = projectsRes.projects || projectsRes.data || projectsRes || [];
+        const projectsRes   = await projectAPI.getProjects();
+        const projectsList  = projectsRes.projects || projectsRes.data || projectsRes || [];
         const matchedCurated = projectsList.find(p => p.title === userProjData.title);
-        
         if (matchedCurated) {
-          const curatedId = matchedCurated.id || matchedCurated._id;
-          setCuratedProjectId(curatedId);
-          console.log('✅ Found curated project for details redirect:', curatedId);
+          setCuratedProjectId(matchedCurated.id || matchedCurated._id);
         }
       } catch (err) {
         console.warn('Could not find matching curated project:', err);
       }
     };
-
     findCuratedProject();
   }, [projectId]);
 
@@ -62,39 +45,38 @@ const ProjectSubmission = ({ user }) => {
 
     if (
       !formData.description.trim() ||
-      !formData.githubUrl.trim() ||
+      !formData.githubUrl.trim()   ||
       !formData.liveDemoUrl.trim() ||
-      !formData.challenges.trim() ||
+      !formData.challenges.trim()  ||
       !formData.learnings.trim()
     ) {
       setError('Please fill in all required fields.');
       return;
     }
 
-    // Resolve user_id from prop or session cache
     const userId = user?.id || user?._id || (() => {
       try { return JSON.parse(sessionStorage.getItem('user') || '{}')?.id; } catch { return null; }
     })();
 
-    if (!userId) {
-      setError('You must be logged in to submit a project.');
-      return;
-    }
+    if (!userId) { setError('You must be logged in to submit a project.'); return; }
 
     setIsSubmitting(true);
-
     try {
       await projectAPI.submitUserProject(userId, projectId, {
-        description: formData.description,
-        github_url: formData.githubUrl,
+        description:   formData.description,
+        github_url:    formData.githubUrl,
         live_demo_url: formData.liveDemoUrl,
-        challenges: formData.challenges,
-        learnings: formData.learnings,
+        challenges:    formData.challenges,
+        learnings:     formData.learnings,
       });
-
       setShowSuccessModal(true);
     } catch (err) {
-      setError(err.message || 'Submission failed. Please try again.');
+      // ✅ Show a friendlier message if already submitted (non-rejected)
+      if (err.message?.includes('already submitted')) {
+        setError('You already have a pending or approved submission for this project.');
+      } else {
+        setError(err.message || 'Submission failed. Please try again.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -102,12 +84,8 @@ const ProjectSubmission = ({ user }) => {
 
   const handleModalClose = () => {
     setShowSuccessModal(false);
-    // Navigate to curated project details if found, otherwise fallback to workspace
-    if (curatedProjectId) {
-      navigate(`/projects/${curatedProjectId}`);
-    } else {
-      navigate(`/projects/${projectId}/workspace`);
-    }
+    if (curatedProjectId) navigate(`/projects/${curatedProjectId}`);
+    else navigate(`/projects/${projectId}/workspace`);
   };
 
   return (
@@ -120,6 +98,7 @@ const ProjectSubmission = ({ user }) => {
           <ArrowLeft className="w-5 h-5" />
           Back to Workspace
         </button>
+
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-[rgb(37,99,235)]">Submit Your Project</h1>
           <p className="text-[rgb(71,85,105)] text-lg">Share your completed work for review and feedback</p>
@@ -161,7 +140,6 @@ const ProjectSubmission = ({ user }) => {
                     onChange={(e) => setFormData({ ...formData, githubUrl: e.target.value })}
                   />
                 </div>
-
                 <div>
                   <label className="block text-[rgb(71,85,105)] text-sm font-medium mb-2">
                     <Link className="w-4 h-4 inline mr-2" />
@@ -177,45 +155,6 @@ const ProjectSubmission = ({ user }) => {
                 </div>
               </div>
             </div>
-          </div>
-
-          {/* File Upload (optional — files aren't sent to backend yet, just UI) */}
-          <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-6">
-            <h2 className="text-2xl font-bold text-[rgb(15,23,42)] mb-4 flex items-center gap-3">
-              <Upload className="w-6 h-6 text-[rgb(37,99,235)]" />
-              Project Files <span className="text-sm font-normal text-[rgb(148,163,184)]">(optional)</span>
-            </h2>
-            <div className="border-2 border-dashed border-[rgb(226,232,240)] rounded-lg p-8 text-center hover:border-[rgb(37,99,235)]/50 transition-all duration-300">
-              <Upload className="w-12 h-12 text-[rgb(148,163,184)] mx-auto mb-4" />
-              <p className="text-[rgb(71,85,105)] font-medium mb-1">Upload project files</p>
-              <p className="text-sm text-[rgb(148,163,184)] mb-4">ZIP, RAR, PDF, documentation</p>
-              <input type="file" multiple onChange={handleFileChange} className="hidden" id="file-upload" />
-              <label
-                htmlFor="file-upload"
-                className="bg-[rgb(37,99,235)] hover:bg-[rgb(29,78,216)] text-white font-semibold py-3 px-6 rounded-lg transition-all duration-300 cursor-pointer inline-block"
-              >
-                Choose Files
-              </label>
-            </div>
-
-            {formData.files.length > 0 && (
-              <div className="mt-6 space-y-3">
-                {formData.files.map((file, index) => (
-                  <div key={index} className="flex items-center justify-between bg-[rgb(248,250,252)] rounded-lg p-4">
-                    <div className="flex items-center gap-3">
-                      <FileText className="w-5 h-5 text-[rgb(37,99,235)]" />
-                      <div>
-                        <div className="text-[rgb(15,23,42)] font-medium">{file.name}</div>
-                        <div className="text-[rgb(148,163,184)] text-sm">{(file.size / 1024 / 1024).toFixed(2)} MB</div>
-                      </div>
-                    </div>
-                    <button type="button" onClick={() => removeFile(index)} className="text-red-500 hover:text-red-600">
-                      Remove
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
 
           {/* Reflection */}
@@ -260,7 +199,6 @@ const ProjectSubmission = ({ user }) => {
             </ul>
           </div>
 
-          {/* Error */}
           {error && (
             <div className="flex items-center gap-2 p-4 bg-red-50 border border-red-200 rounded-xl text-red-600 text-sm">
               <AlertCircle className="w-4 h-4 shrink-0" />{error}
@@ -288,7 +226,6 @@ const ProjectSubmission = ({ user }) => {
           </div>
         </form>
 
-        {/* Success Modal */}
         {showSuccessModal && (
           <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
             <div className="bg-white border border-[rgb(226,232,240)] rounded-xl p-8 max-w-md w-full text-center">
@@ -297,8 +234,8 @@ const ProjectSubmission = ({ user }) => {
               </div>
               <h3 className="text-2xl font-bold text-[rgb(15,23,42)] mb-2">Project Submitted!</h3>
               <p className="text-[rgb(71,85,105)] mb-6">
-                Your project has been submitted for mentor review. You'll be notified once reviewed.
-                A certificate will be issued automatically when your project is approved and your quiz is passed.
+                Your project has been submitted for mentor review. A certificate will be issued automatically
+                when your project is approved and your quiz is passed.
               </p>
               <button
                 onClick={handleModalClose}

@@ -62,9 +62,9 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if GROQ_API_KEY:
-    logger.info("✅ Groq API key loaded successfully")
+    logger.info("Groq API key loaded successfully")
 else:
-    logger.error("❌ GROQ_API_KEY not found in .env — get a free key at console.groq.com")
+    logger.error("GROQ_API_KEY not found in .env — get a free key at console.groq.com")
 
 
 router = APIRouter()
